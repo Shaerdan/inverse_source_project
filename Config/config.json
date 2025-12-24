@@ -24,7 +24,7 @@
     
     "nonlinear": {
         "_comment": "Choose optimizer from: differential_evolution, basinhopping, dual_annealing, shgo, L-BFGS-B, CG, BFGS, Newton-CG, SLSQP, trust-constr, Nelder-Mead, Powell",
-        "optimizer": "L-BFGS-B",
+        "optimizer": "differential_evolution",
         
         "initial_guess": {
             "_comment": "Strategy: 'random', 'circular', 'grid', 'custom'",
@@ -146,11 +146,34 @@
     },
     
     "linear": {
-        "_comment": "regularization: 'l1' (sparse), 'l2' (Tikhonov), 'tv' (total variation)",
-        "regularization": "l1",
-        "alpha": 1e-3,
-        "l1_max_iter": 50,
-        "tv_max_iter": 100
+        "_comment": "regularization: 'l1' (sparse), 'l2' (Tikhonov), 'tv_admm', 'tv_primal_dual'",
+        "regularization": "tv_admm",
+        
+        "l2": {
+            "alpha": 1e-4
+        },
+        
+        "l1": {
+            "alpha": 1e-4,
+            "max_iter": 50
+        },
+        
+        "tv_admm": {
+            "_comment": "ADMM algorithm for TV: robust, easy to tune",
+            "alpha": 1e-3,
+            "rho": 1.0,
+            "max_iter": 200,
+            "tol": 1e-6
+        },
+        
+        "tv_primal_dual": {
+            "_comment": "Chambolle-Pock algorithm: often faster",
+            "alpha": 1e-3,
+            "tau": 0.1,
+            "sigma": 0.1,
+            "max_iter": 500,
+            "tol": 1e-6
+        }
     },
     
     "visualization": {
