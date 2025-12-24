@@ -84,3 +84,5 @@ results/*.npz
 !meshes/*.msh
 *:Zone.Identifier
 *.Zone.Identifier
+*:Zone.Identifier
+*.Zone.Identifier
