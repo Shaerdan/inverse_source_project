@@ -1,0 +1,49 @@
+name: inverse_source
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python version - 3.11 is stable and performant
+  - python=3.11
+  
+  # Core FEniCSx stack (latest stable)
+  - fenics-dolfinx>=0.8.0
+  - fenics-basix>=0.8.0
+  - fenics-ufl>=2024.1
+  - fenics-ffcx>=0.8.0
+  
+  # MPI and parallel computing
+  - mpich
+  - mpi4py
+  - petsc4py
+  - slepc4py  # For eigenvalue problems (useful for inverse problems)
+  
+  # Mesh generation and handling
+  - gmsh
+  - meshio>=5.3
+  - h5py  # For mesh I/O
+  
+  # Scientific computing
+  - numpy>=1.24
+  - scipy>=1.11
+  
+  # Visualization
+  - matplotlib>=3.7
+  - pyvista>=0.42  # 3D visualization for FEniCSx
+  - vtk
+  
+  # Jupyter support (for PyCharm notebooks)
+  - jupyterlab>=4.0
+  - ipykernel
+  - ipywidgets
+  
+  # Development tools
+  - pytest
+  - black
+  - pylint
+  
+  # pip dependencies (not available via conda)
+  - pip
+  - pip:
+    - tqdm  # Progress bars
