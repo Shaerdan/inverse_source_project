@@ -82,3 +82,5 @@ results/*.npz
 
 # Keep mesh files
 !meshes/*.msh
+*:Zone.Identifier
+*.Zone.Identifier
