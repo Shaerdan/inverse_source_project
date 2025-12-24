@@ -1,0 +1,61 @@
+{
+    "problem": {
+        "n_sources": 4,
+        "radius": 1.0,
+        "noise_level": 0.001
+    },
+    
+    "mesh": {
+        "resolution_forward": 0.05,
+        "resolution_inverse_linear": 0.08
+    },
+    
+    "sources_true": [
+        {"x": -0.3, "y": 0.4, "intensity": 1.0},
+        {"x": 0.5, "y": 0.3, "intensity": 1.0},
+        {"x": -0.4, "y": -0.4, "intensity": -1.0},
+        {"x": 0.3, "y": -0.5, "intensity": -1.0}
+    ],
+    
+    "solver": {
+        "method": "nonlinear",
+        "run_both": true
+    },
+    
+    "nonlinear": {
+        "optimizer": "differential_evolution",
+        "differential_evolution": {
+            "maxiter": 50,
+            "popsize": 10,
+            "tol": 1e-6,
+            "seed": 42,
+            "mutation": [0.5, 1.0],
+            "recombination": 0.7
+        },
+        "basinhopping": {
+            "niter": 100,
+            "T": 1.0,
+            "stepsize": 0.5,
+            "seed": 42
+        },
+        "dual_annealing": {
+            "maxiter": 100,
+            "initial_temp": 5230.0,
+            "restart_temp_ratio": 2e-5,
+            "seed": 42
+        }
+    },
+    
+    "linear": {
+        "regularization": "l1",
+        "alpha": 1e-4,
+        "l1_max_iter": 50
+    },
+    
+    "visualization": {
+        "live_plot": false,
+        "update_interval": 5,
+        "save_results": true,
+        "output_dir": "results"
+    }
+}
