@@ -5,30 +5,44 @@ Inverse Source Localization Package
 A comprehensive toolkit for inverse source localization in 2D domains
 using Boundary Element Methods (BEM) and Finite Element Methods (FEM).
 
-Quick Start:
+Formulations
+------------
+1. **Linear (Distributional)**: Sources fixed to grid, solve for intensities
+   - BEMLinearInverseSolver
+   - FEMLinearInverseSolver
+   
+2. **Nonlinear (Continuous)**: Optimize source positions and intensities
+   - BEMNonlinearInverseSolver  
+   - FEMNonlinearInverseSolver
+
+Quick Start
 -----------
 >>> from inverse_source import bem_solver
->>>
+>>> 
 >>> # Create sources
 >>> sources = [
 ...     ((-0.3, 0.4), 1.0),
 ...     ((0.5, -0.3), -1.0),
 ... ]
->>>
+>>> 
 >>> # Forward solve
 >>> forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
 >>> u_boundary = forward.solve(sources)
->>>
->>> # Inverse solve (nonlinear)
+>>> 
+>>> # Inverse solve (nonlinear - continuous positions)
 >>> inverse = bem_solver.BEMNonlinearInverseSolver(n_sources=2, n_boundary=100)
 >>> inverse.set_measured_data(u_boundary)
->>> sources_recovered, result = inverse.solve()
+>>> result = inverse.solve()
+>>> 
+>>> # Or linear inverse (grid-based)
+>>> linear = bem_solver.BEMLinearInverseSolver(n_boundary=100)
+>>> q = linear.solve_l1(u_boundary, alpha=1e-4)
 
-Authors:
+Authors
 -------
 Serdan (https://github.com/Shaerdan/inverse_source_project)
 
-License:
+License
 -------
 MIT License
 """
@@ -36,14 +50,43 @@ MIT License
 __version__ = "1.0.0"
 __author__ = "Serdan"
 
-# Core solvers
+# =============================================================================
+# BEM SOLVERS (Analytical Green's function - mesh-free)
+# =============================================================================
 from .bem_solver import (
+    # Forward
     BEMForwardSolver,
+    # Inverse - Linear (grid-based)
     BEMLinearInverseSolver,
+    # Inverse - Nonlinear (continuous positions)
     BEMNonlinearInverseSolver,
+    # Utilities
     greens_function_disk_neumann,
+    generate_synthetic_data,
+    Source,
+    InverseResult,
 )
 
+# =============================================================================
+# FEM SOLVERS (Finite Element - mesh-based)
+# =============================================================================
+from .fem_solver import (
+    # Forward
+    FEMForwardSolver,
+    # Inverse - Linear (grid-based)
+    FEMLinearInverseSolver,
+    # Inverse - Nonlinear (continuous positions)
+    FEMNonlinearInverseSolver,
+    # Mesh utilities
+    create_disk_mesh_scipy,
+    # Low-level solve
+    solve_poisson_scipy,
+    generate_synthetic_data_fem,
+)
+
+# =============================================================================
+# CONFORMAL BEM (General domains via conformal mapping)
+# =============================================================================
 from .conformal_bem import (
     ConformalBEMSolver,
     ConformalNonlinearInverse,
@@ -54,7 +97,9 @@ from .conformal_bem import (
     StarShapedMap,
 )
 
-# Regularization methods
+# =============================================================================
+# REGULARIZATION METHODS
+# =============================================================================
 from .regularization import (
     solve_l1,
     solve_l2,
@@ -65,7 +110,9 @@ from .regularization import (
     RegularizationResult,
 )
 
-# Configuration
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 from .config import (
     Config,
     ForwardConfig,
@@ -78,7 +125,9 @@ from .config import (
     TEMPLATES,
 )
 
-# Utilities
+# =============================================================================
+# UTILITIES
+# =============================================================================
 from .utils import (
     plot_sources,
     plot_boundary_data,
@@ -89,7 +138,9 @@ from .utils import (
     create_test_sources,
 )
 
-# Parameter study
+# =============================================================================
+# PARAMETER STUDY
+# =============================================================================
 from .parameter_study import (
     parameter_sweep,
     find_l_curve_corner,
@@ -101,7 +152,9 @@ from .parameter_study import (
     SweepResult,
 )
 
-# Convenience imports
+# =============================================================================
+# MODULE IMPORTS (for inverse_source.bem_solver style access)
+# =============================================================================
 from . import bem_solver
 from . import conformal_bem
 from . import fem_solver
@@ -110,13 +163,30 @@ from . import parameter_study
 from . import config
 from . import utils
 
+# =============================================================================
+# PUBLIC API
+# =============================================================================
 __all__ = [
+    # Version
     '__version__',
     '__author__',
+    
+    # BEM
     'BEMForwardSolver',
-    'BEMLinearInverseSolver',
+    'BEMLinearInverseSolver', 
     'BEMNonlinearInverseSolver',
     'greens_function_disk_neumann',
+    'generate_synthetic_data',
+    
+    # FEM
+    'FEMForwardSolver',
+    'FEMLinearInverseSolver',
+    'FEMNonlinearInverseSolver',
+    'create_disk_mesh_scipy',
+    'solve_poisson_scipy',
+    'generate_synthetic_data_fem',
+    
+    # Conformal
     'ConformalBEMSolver',
     'ConformalNonlinearInverse',
     'ConformalLinearInverse',
@@ -124,6 +194,12 @@ __all__ = [
     'DiskMap',
     'EllipseMap',
     'StarShapedMap',
+    
+    # Data classes
+    'Source',
+    'InverseResult',
+    
+    # Regularization
     'solve_l1',
     'solve_l2',
     'solve_tv_chambolle_pock',
@@ -131,10 +207,14 @@ __all__ = [
     'solve_regularized',
     'build_gradient_operator',
     'RegularizationResult',
+    
+    # Config
     'Config',
     'get_config',
     'get_template',
     'TEMPLATES',
+    
+    # Utils
     'plot_sources',
     'plot_boundary_data',
     'plot_recovery_comparison',
@@ -142,10 +222,14 @@ __all__ = [
     'l_curve_analysis',
     'plot_l_curve',
     'create_test_sources',
+    
+    # Parameter study
     'parameter_sweep',
     'find_l_curve_corner',
     'compare_methods',
     'SweepResult',
+    
+    # Modules
     'bem_solver',
     'conformal_bem',
     'fem_solver',

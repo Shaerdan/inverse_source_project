@@ -73,7 +73,7 @@ class Config:
     grid: GridConfig = field(default_factory=GridConfig)
     tv: TVConfig = field(default_factory=TVConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
-
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -83,7 +83,7 @@ class Config:
             'tv': asdict(self.tv),
             'visualization': asdict(self.visualization),
         }
-
+    
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'Config':
         """Create from dictionary."""
@@ -94,7 +94,7 @@ class Config:
             tv=TVConfig(**d.get('tv', {})),
             visualization=VisualizationConfig(**d.get('visualization', {})),
         )
-
+    
     def save(self, path: str):
         """Save configuration to JSON or YAML file."""
         with open(path, 'w') as f:
@@ -103,7 +103,7 @@ class Config:
             else:
                 json.dump(self.to_dict(), f, indent=2)
         print(f"Configuration saved to {path}")
-
+    
     @classmethod
     def load(cls, path: str) -> 'Config':
         """Load configuration from JSON or YAML file."""
@@ -126,19 +126,19 @@ def create_default_config(path: str = "config.json") -> Config:
 def get_config(path: Optional[str] = None) -> Config:
     """
     Get configuration, loading from file if provided.
-
+    
     Parameters
     ----------
     path : str, optional
         Path to config file. If None, returns default config.
-
+        
     Returns
     -------
     config : Config
     """
     if path is None:
         return Config()
-
+    
     path = Path(path)
     if path.exists():
         return Config.load(str(path))
@@ -150,28 +150,28 @@ def get_config(path: Optional[str] = None) -> Config:
 # Pre-defined configuration templates
 TEMPLATES = {
     'default': Config(),
-
+    
     'high_resolution': Config(
         forward=ForwardConfig(n_boundary_points=200),
         grid=GridConfig(n_radial=20, n_angular=40),
     ),
-
+    
     'fast': Config(
         forward=ForwardConfig(n_boundary_points=50),
         grid=GridConfig(n_radial=5, n_angular=10),
         inverse=InverseConfig(max_iter=50),
     ),
-
+    
     'tv_chambolle_pock': Config(
         inverse=InverseConfig(regularization='tv'),
         tv=TVConfig(algorithm='chambolle_pock', max_iter=1000),
     ),
-
+    
     'tv_admm': Config(
         inverse=InverseConfig(regularization='tv'),
         tv=TVConfig(algorithm='admm', rho=1.0, max_iter=500),
     ),
-
+    
     'nonlinear': Config(
         inverse=InverseConfig(
             method='nonlinear',
@@ -180,7 +180,7 @@ TEMPLATES = {
             max_iter=200,
         ),
     ),
-
+    
     'ellipse': Config(
         forward=ForwardConfig(
             domain_type='ellipse',
