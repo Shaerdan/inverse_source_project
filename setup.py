@@ -22,7 +22,6 @@ setup(
         "gmsh>=4.12",
         "meshio>=5.3",
         "tqdm",
-        "pyyaml",
     ],
     extras_require={
         "dev": ["pytest", "black", "flake8"],
