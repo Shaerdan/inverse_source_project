@@ -426,25 +426,24 @@ class BEMNonlinearInverseSolver:
     n_sources : int
         Number of sources to recover
     n_boundary : int
-        Number of boundary measurement points
-    n_elements : int
-        Number of boundary elements for BEM
-    quadrature_order : int
-        Gaussian quadrature order
+        Number of boundary measurement points (must match u_measured size)
     """
     
-    def __init__(self, n_sources: int, n_boundary: int = 100, 
-                 n_elements: int = 64, quadrature_order: int = 6):
+    def __init__(self, n_sources: int, n_boundary: int = 100):
         self.n_sources = n_sources
-        self.forward = BEMForwardSolver(n_elements=n_elements, 
-                                         quadrature_order=quadrature_order)
         self.n_boundary = n_boundary
+        # Use same number of elements as boundary points for consistency
+        self.forward = BEMForwardSolver(n_elements=n_boundary, quadrature_order=6)
         self.u_measured = None
         self.history = []
     
     def set_measured_data(self, u_measured: np.ndarray):
         """Set the boundary measurements to fit."""
         self.u_measured = u_measured - np.mean(u_measured)
+        # Update forward solver to match measurement size if different
+        if len(u_measured) != self.n_boundary:
+            self.n_boundary = len(u_measured)
+            self.forward = BEMForwardSolver(n_elements=self.n_boundary, quadrature_order=6)
     
     def _params_to_sources(self, params: np.ndarray) -> List[Tuple[Tuple[float, float], float]]:
         """Convert optimization parameters to source list."""
@@ -539,7 +538,7 @@ class BEMNonlinearInverseSolver:
         if method.lower() == 'differential_evolution':
             self.history = []
             result = differential_evolution(self._objective, bounds, maxiter=maxiter,
-                                           seed=42, polish=True, workers=1)
+                                           seed=42, polish=True, updating='deferred')
             best_result = result
             best_misfit = result.fun
             

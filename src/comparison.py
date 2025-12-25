@@ -426,7 +426,6 @@ def run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=4,
         from .bem_solver import BEMNonlinearInverseSolver, BEMForwardSolver
     except ImportError:
         from bem_solver import BEMNonlinearInverseSolver, BEMForwardSolver
-    from scipy.optimize import differential_evolution
     
     t0 = time()
     
@@ -443,8 +442,8 @@ def run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=4,
     # Convert sources
     sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
     
-    # Compute recovered boundary data using BEM forward
-    forward = BEMForwardSolver(n_elements=64)
+    # Compute recovered boundary data using same-sized forward solver
+    forward = BEMForwardSolver(n_elements=len(u_measured))
     u_rec = forward.solve(sources_rec)
     
     u_true = u_measured - np.mean(u_measured)

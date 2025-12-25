@@ -6,7 +6,7 @@
     "position_rmse": 0.25925084999809445,
     "intensity_rmse": 0.8409468863672155,
     "boundary_residual": 0.0036544172533556577,
-    "time_seconds": 0.07133913040161133,
+    "time_seconds": 0.0992124080657959,
     "iterations": null,
     "sources_recovered": [
       [
@@ -242,7 +242,7 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9668866752561216,
     "boundary_residual": 0.002692572680939577,
-    "time_seconds": 0.029851198196411133,
+    "time_seconds": 0.029414653778076172,
     "iterations": null,
     "sources_recovered": [
       [
@@ -1003,7 +1003,7 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9683599963435806,
     "boundary_residual": 0.005497405233902339,
-    "time_seconds": 0.03782963752746582,
+    "time_seconds": 0.04021644592285156,
     "iterations": null,
     "sources_recovered": [
       [
@@ -1862,7 +1862,7 @@
     "position_rmse": 0.2736154428217534,
     "intensity_rmse": 2.3057631870777615,
     "boundary_residual": 0.010024366130739624,
-    "time_seconds": 2.902069568634033,
+    "time_seconds": 2.5390448570251465,
     "iterations": 200,
     "sources_recovered": [
       [
@@ -1902,7 +1902,7 @@
     "position_rmse": 0.23483923566679082,
     "intensity_rmse": 2.4816875699298113,
     "boundary_residual": 0.01440766814459067,
-    "time_seconds": 4.699439764022827,
+    "time_seconds": 4.920597076416016,
     "iterations": 200,
     "sources_recovered": [
       [
@@ -1942,7 +1942,7 @@
     "position_rmse": 0.27334979323929276,
     "intensity_rmse": 0.81440630656038,
     "boundary_residual": 0.005415632841993743,
-    "time_seconds": 0.1362450122833252,
+    "time_seconds": 0.1337141990661621,
     "iterations": null,
     "sources_recovered": null
   },
@@ -1953,7 +1953,7 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9677542326804609,
     "boundary_residual": 0.003384926670766423,
-    "time_seconds": 0.12526702880859375,
+    "time_seconds": 0.15022492408752441,
     "iterations": null,
     "sources_recovered": null
   },
@@ -1964,9 +1964,89 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9685176534276684,
     "boundary_residual": 0.006569730398765609,
-    "time_seconds": 0.135667085647583,
+    "time_seconds": 0.1390242576599121,
     "iterations": null,
     "sources_recovered": null
+  },
+  {
+    "solver_name": "BEM Numerical Nonlinear (L-BFGS-B) x5",
+    "method_type": "nonlinear",
+    "forward_type": "bem_numerical",
+    "position_rmse": 0.08759295009675215,
+    "intensity_rmse": 0.3585911235794431,
+    "boundary_residual": 0.00819429737490705,
+    "time_seconds": 20.149807691574097,
+    "iterations": 1440,
+    "sources_recovered": [
+      [
+        [
+          0.5353730412132055,
+          0.331256266675509
+        ],
+        0.819301848256575
+      ],
+      [
+        [
+          0.3492474705216166,
+          -0.5167298867400274
+        ],
+        -0.805025164651849
+      ],
+      [
+        [
+          -0.2533248133383176,
+          0.2923240582161122
+        ],
+        1.4638082875145728
+      ],
+      [
+        [
+          -0.31432636085624044,
+          -0.3318528285308193
+        ],
+        -1.4780849711192987
+      ]
+    ]
+  },
+  {
+    "solver_name": "BEM Numerical Nonlinear (differential_evolution)",
+    "method_type": "nonlinear",
+    "forward_type": "bem_numerical",
+    "position_rmse": 0.2686174685790738,
+    "intensity_rmse": 4.65047550846728,
+    "boundary_residual": 0.015042104471657434,
+    "time_seconds": 31.44977641105652,
+    "iterations": 19617,
+    "sources_recovered": [
+      [
+        [
+          0.5765230371799985,
+          0.3399932821414586
+        ],
+        0.6725128421098
+      ],
+      [
+        [
+          -0.2018071748122806,
+          0.04890362958164486
+        ],
+        7.483095801489495
+      ],
+      [
+        [
+          -0.2074432759990803,
+          -0.0946352942121474
+        ],
+        -7.64320415372349
+      ],
+      [
+        [
+          0.4163223062685981,
+          -0.566325509374738
+        ],
+        -0.5124044898758058
+      ]
+    ]
   },
   {
     "solver_name": "FEM Linear (L1)",
@@ -1975,7 +2055,7 @@
     "position_rmse": 0.27334979323929276,
     "intensity_rmse": 0.8455595680982951,
     "boundary_residual": 0.006031083053182253,
-    "time_seconds": 0.47350573539733887,
+    "time_seconds": 0.45923638343811035,
     "iterations": null,
     "sources_recovered": [
       [
@@ -2218,7 +2298,7 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9701068051470425,
     "boundary_residual": 0.001603269720727188,
-    "time_seconds": 0.4509401321411133,
+    "time_seconds": 0.45038270950317383,
     "iterations": null,
     "sources_recovered": [
       [
@@ -2986,7 +3066,7 @@
     "position_rmse": 0.05195576463978305,
     "intensity_rmse": 0.9725360751602103,
     "boundary_residual": 0.06430641442738008,
-    "time_seconds": 0.4633064270019531,
+    "time_seconds": 0.4642221927642822,
     "iterations": null,
     "sources_recovered": [
       [
@@ -3838,7 +3918,7 @@
     "position_rmse": 0.3094714292199369,
     "intensity_rmse": 1.885542695123307,
     "boundary_residual": 0.011239227711997125,
-    "time_seconds": 47.83125829696655,
+    "time_seconds": 45.368757486343384,
     "iterations": 100,
     "sources_recovered": [
       [
@@ -3878,7 +3958,7 @@
     "position_rmse": 0.0044582679401888965,
     "intensity_rmse": 0.01021004272667564,
     "boundary_residual": 0.0017815943394180538,
-    "time_seconds": 58.76753234863281,
+    "time_seconds": 58.368274450302124,
     "iterations": 100,
     "sources_recovered": [
       [
