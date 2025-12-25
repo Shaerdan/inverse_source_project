@@ -1,0 +1,183 @@
+# =============================================================================
+# Inverse Source Localization Configuration
+# =============================================================================
+# See docs/main.pdf for mathematical background
+# GitHub: https://github.com/Shaerdan/inverse_source_project
+
+# -----------------------------------------------------------------------------
+# FORWARD SOLVER SETTINGS
+# -----------------------------------------------------------------------------
+forward:
+  # Solver method
+  # Options: "bem" (Boundary Element, analytical Green's function - faster)
+  #          "fem" (Finite Element, more general, requires mesh)
+  method: "bem"
+  
+  # Number of measurement points on domain boundary
+  # Higher = more accurate but slower. Typical: 50-200
+  n_boundary_points: 100
+  
+  # Domain geometry type
+  # Options: "disk"    - unit disk (analytical Green's function)
+  #          "ellipse" - ellipse via Joukowsky conformal map
+  #          "star"    - star-shaped via numerical conformal map
+  domain_type: "disk"
+  
+  # Domain-specific parameters
+  domain_params:
+    radius: 1.0           # For disk: radius
+    a: 2.0                # For ellipse: semi-major axis (x)
+    b: 1.0                # For ellipse: semi-minor axis (y)
+    # For star: define r(theta) function in code
+
+# -----------------------------------------------------------------------------
+# INVERSE SOLVER SETTINGS
+# -----------------------------------------------------------------------------
+inverse:
+  # Inverse method type
+  # Options: "linear"    - sources on fixed grid, solve for intensities (convex)
+  #          "nonlinear" - optimize positions AND intensities (non-convex)
+  method: "linear"
+  
+  # Regularization type (for linear method)
+  # Options: "l1" - sparsity-promoting, BEST for point sources
+  #          "l2" - Tikhonov, smooth solutions
+  #          "tv" - Total Variation, piecewise constant
+  regularization: "l1"
+  
+  # Regularization parameter
+  # Larger = more regularization (smoother), smaller = fit data closely
+  # Use L-curve analysis to find optimal. Typical range: 1e-6 to 1e-1
+  alpha: 1.0e-4
+  
+  # Number of sources to recover (for nonlinear method)
+  # Should match or exceed true number of sources
+  n_sources: 4
+  
+  # Optimization algorithm (for nonlinear method)
+  # Options: "L-BFGS-B"              - gradient-based, fast, local minimum
+  #          "differential_evolution" - global optimizer, slower but robust
+  #          "SLSQP"                  - sequential least squares
+  #          "trust-constr"           - trust region constrained
+  #          "basinhopping"           - hybrid global/local
+  optimizer: "L-BFGS-B"
+  
+  # Maximum iterations for optimization
+  max_iter: 200
+  
+  # Convergence tolerance
+  tolerance: 1.0e-6
+
+# -----------------------------------------------------------------------------
+# SOURCE GRID SETTINGS (for linear method)
+# -----------------------------------------------------------------------------
+grid:
+  # Number of radial divisions in polar grid
+  # Total grid points = n_radial × n_angular
+  n_radial: 10
+  
+  # Number of angular divisions
+  n_angular: 20
+  
+  # Minimum radius (avoid singularity at origin)
+  r_min: 0.1
+  
+  # Maximum radius (stay inside domain boundary)
+  r_max: 0.9
+
+# -----------------------------------------------------------------------------
+# TOTAL VARIATION SETTINGS
+# -----------------------------------------------------------------------------
+tv:
+  # TV optimization algorithm
+  # Options: "chambolle_pock" - primal-dual, faster convergence (recommended)
+  #          "admm"           - Alternating Direction Method of Multipliers
+  algorithm: "chambolle_pock"
+  
+  # Chambolle-Pock step sizes
+  # Constraint: tau × sigma × ||D||² < 1 for convergence
+  tau: 0.1      # primal step size
+  sigma: 0.1    # dual step size
+  theta: 1.0    # extrapolation (1.0 = standard)
+  
+  # ADMM penalty parameter
+  # Larger = faster but less accurate. Typical: 0.1 to 10
+  rho: 1.0
+  
+  # TV-specific iteration limits
+  max_iter: 500
+  tol: 1.0e-5
+
+# -----------------------------------------------------------------------------
+# VISUALIZATION SETTINGS
+# -----------------------------------------------------------------------------
+visualization:
+  # Show live plot updates during optimization
+  live_plot: false
+  
+  # Update interval for live plotting (every N iterations)
+  plot_interval: 10
+  
+  # Auto-save figures
+  save_figures: true
+  
+  # Output directory for figures
+  figure_dir: "results"
+  
+  # Figure resolution (DPI)
+  # 150 = screen quality, 300 = publication quality
+  dpi: 150
+
+# =============================================================================
+# QUICK REFERENCE: Common Configurations
+# =============================================================================
+#
+# 1. Basic L1 (point sources, recommended starting point):
+#    inverse.regularization: "l1"
+#    inverse.alpha: 1.0e-4
+#
+# 2. High Resolution:
+#    forward.n_boundary_points: 200
+#    grid.n_radial: 20
+#    grid.n_angular: 40
+#
+# 3. Nonlinear Global Search:
+#    inverse.method: "nonlinear"
+#    inverse.optimizer: "differential_evolution"
+#    inverse.max_iter: 500
+#
+# 4. Total Variation:
+#    inverse.regularization: "tv"
+#    tv.algorithm: "chambolle_pock"
+#    tv.max_iter: 1000
+#
+# 5. Ellipse Domain:
+#    forward.domain_type: "ellipse"
+#    forward.domain_params:
+#      a: 2.0
+#      b: 1.0
+#
+# =============================================================================
+# PARAMETER SELECTION GUIDE
+# =============================================================================
+#
+# REGULARIZATION (inverse.regularization):
+#   - Use "l1" for sparse point sources (most common case)
+#   - Use "l2" if sources are distributed/smooth
+#   - Use "tv" for piecewise constant source distributions
+#
+# ALPHA (inverse.alpha):
+#   - Too small: noisy, overfitting
+#   - Too large: over-smoothed, misses sources
+#   - Use L-curve analysis: python -m inverse_source.cli sweep --plot
+#
+# OPTIMIZER (inverse.optimizer):
+#   - Start with "L-BFGS-B" (fast)
+#   - If stuck in local minimum, try "differential_evolution"
+#   - "basinhopping" is a good compromise
+#
+# GRID RESOLUTION (grid.n_radial, grid.n_angular):
+#   - Higher resolution = better localization but slower
+#   - Start with 10×20, increase if sources not resolved
+#
+# =============================================================================

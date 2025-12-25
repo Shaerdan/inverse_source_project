@@ -1,0 +1,180 @@
+{
+  "_comment": "Inverse Source Localization Configuration File",
+  "_documentation": "See docs/main.pdf for mathematical background",
+  
+  "forward": {
+    "_comment": "Forward solver settings",
+    
+    "method": "bem",
+    "_method_options": ["bem", "fem"],
+    "_method_description": "bem = Boundary Element Method (analytical Green's function, faster), fem = Finite Element Method (more general, requires mesh)",
+    
+    "n_boundary_points": 100,
+    "_n_boundary_points_description": "Number of measurement points on domain boundary. Higher = more accurate but slower. Typical: 50-200",
+    
+    "domain_type": "disk",
+    "_domain_type_options": ["disk", "ellipse", "star"],
+    "_domain_type_description": "disk = unit disk (analytical), ellipse = ellipse via Joukowsky map, star = star-shaped via numerical conformal map",
+    
+    "domain_params": {
+      "_comment": "Domain-specific parameters",
+      "radius": 1.0,
+      "_radius_description": "For disk: radius of the domain",
+      
+      "a": 2.0,
+      "_a_description": "For ellipse: semi-major axis (x-direction)",
+      
+      "b": 1.0,
+      "_b_description": "For ellipse: semi-minor axis (y-direction)",
+      
+      "star_func": "1.0 + 0.3 * cos(5 * theta)",
+      "_star_func_description": "For star: r(theta) function defining boundary in polar coordinates"
+    }
+  },
+  
+  "inverse": {
+    "_comment": "Inverse solver settings",
+    
+    "method": "linear",
+    "_method_options": ["linear", "nonlinear"],
+    "_method_description": "linear = sources on fixed grid, solve for intensities (convex, use regularization). nonlinear = optimize source positions and intensities (non-convex, continuous positions)",
+    
+    "regularization": "l1",
+    "_regularization_options": ["l1", "l2", "tv"],
+    "_regularization_description": "l1 = sparsity-promoting (best for point sources), l2 = Tikhonov (smooth solutions), tv = Total Variation (piecewise constant)",
+    
+    "alpha": 1e-4,
+    "_alpha_description": "Regularization parameter. Larger = more regularization, smaller = fit data more closely. Use L-curve analysis to find optimal value. Typical range: 1e-6 to 1e-1",
+    
+    "n_sources": 4,
+    "_n_sources_description": "For nonlinear method: number of sources to recover. Must match or exceed true number of sources",
+    
+    "optimizer": "L-BFGS-B",
+    "_optimizer_options": ["L-BFGS-B", "differential_evolution", "SLSQP", "trust-constr", "basinhopping"],
+    "_optimizer_description": "L-BFGS-B = gradient-based (fast, local). differential_evolution = global optimizer (slower, better for multiple minima). basinhopping = hybrid global/local",
+    
+    "max_iter": 200,
+    "_max_iter_description": "Maximum iterations for optimization. Increase if not converging",
+    
+    "tolerance": 1e-6,
+    "_tolerance_description": "Convergence tolerance. Smaller = more accurate but slower"
+  },
+  
+  "grid": {
+    "_comment": "Source grid settings for linear inverse method",
+    
+    "n_radial": 10,
+    "_n_radial_description": "Number of radial divisions in polar grid. Total grid points = n_radial × n_angular",
+    
+    "n_angular": 20,
+    "_n_angular_description": "Number of angular divisions in polar grid",
+    
+    "r_min": 0.1,
+    "_r_min_description": "Minimum radius for grid (avoid boundary singularities). Range: 0 to r_max",
+    
+    "r_max": 0.9,
+    "_r_max_description": "Maximum radius for grid (stay inside domain). Range: r_min to 1.0 for unit disk"
+  },
+  
+  "tv": {
+    "_comment": "Total Variation regularization settings",
+    
+    "algorithm": "chambolle_pock",
+    "_algorithm_options": ["chambolle_pock", "admm"],
+    "_algorithm_description": "chambolle_pock = primal-dual algorithm (faster convergence, recommended). admm = Alternating Direction Method of Multipliers (more robust)",
+    
+    "tau": 0.1,
+    "_tau_description": "Chambolle-Pock: primal step size. Must satisfy tau × sigma × ||D||² < 1",
+    
+    "sigma": 0.1,
+    "_sigma_description": "Chambolle-Pock: dual step size. Must satisfy tau × sigma × ||D||² < 1",
+    
+    "theta": 1.0,
+    "_theta_description": "Chambolle-Pock: extrapolation parameter. 1.0 = standard, can try 0.5-1.0",
+    
+    "rho": 1.0,
+    "_rho_description": "ADMM: penalty parameter. Larger = faster convergence but less accurate. Typical: 0.1 to 10",
+    
+    "max_iter": 500,
+    "_max_iter_description": "Maximum iterations for TV optimization",
+    
+    "tol": 1e-5,
+    "_tol_description": "Convergence tolerance for TV algorithms"
+  },
+  
+  "visualization": {
+    "_comment": "Plotting and output settings",
+    
+    "live_plot": false,
+    "_live_plot_description": "Show live updates during optimization (slower but useful for debugging)",
+    
+    "plot_interval": 10,
+    "_plot_interval_description": "Update plot every N iterations when live_plot=true",
+    
+    "save_figures": true,
+    "_save_figures_description": "Automatically save figures to figure_dir",
+    
+    "figure_dir": "results",
+    "_figure_dir_description": "Directory for saving output figures",
+    
+    "dpi": 150,
+    "_dpi_description": "Resolution for saved figures. 150 = good for screen, 300 = publication quality"
+  },
+  
+  "noise": {
+    "_comment": "Noise settings for synthetic data generation",
+    
+    "level": 0.001,
+    "_level_description": "Standard deviation of Gaussian noise added to measurements. 0 = no noise, 0.01 = 1% noise level",
+    
+    "seed": null,
+    "_seed_description": "Random seed for reproducibility. null = random, integer = fixed seed"
+  },
+  
+  "sources": {
+    "_comment": "True source configuration (for synthetic experiments)",
+    "_format": "List of [x, y, intensity] arrays. Intensities must sum to zero (compatibility condition)",
+    
+    "positions": [
+      [-0.3, 0.4],
+      [0.5, 0.3],
+      [-0.4, -0.4],
+      [0.3, -0.5]
+    ],
+    "intensities": [1.0, 1.0, -1.0, -1.0],
+    
+    "_example_description": "4 sources: 2 positive (red) at (-0.3,0.4) and (0.5,0.3), 2 negative (blue) at (-0.4,-0.4) and (0.3,-0.5)"
+  },
+  
+  "_usage_examples": {
+    "basic_l1": {
+      "inverse.regularization": "l1",
+      "inverse.alpha": 1e-4,
+      "_description": "Standard L1 for point source recovery"
+    },
+    "high_resolution": {
+      "forward.n_boundary_points": 200,
+      "grid.n_radial": 20,
+      "grid.n_angular": 40,
+      "_description": "Higher resolution grid for better accuracy"
+    },
+    "nonlinear_global": {
+      "inverse.method": "nonlinear",
+      "inverse.optimizer": "differential_evolution",
+      "inverse.max_iter": 500,
+      "_description": "Global optimization for continuous source positions"
+    },
+    "tv_regularization": {
+      "inverse.regularization": "tv",
+      "tv.algorithm": "chambolle_pock",
+      "tv.max_iter": 1000,
+      "_description": "Total Variation for piecewise constant recovery"
+    },
+    "ellipse_domain": {
+      "forward.domain_type": "ellipse",
+      "forward.domain_params.a": 2.0,
+      "forward.domain_params.b": 1.0,
+      "_description": "Ellipse domain with semi-axes 2×1"
+    }
+  }
+}

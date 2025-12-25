@@ -32,6 +32,7 @@ dependencies = [
     "gmsh>=4.12",
     "meshio>=5.3",
     "tqdm",
+    "pyyaml>=6.0", 
 ]
 
 [project.optional-dependencies]

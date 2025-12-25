@@ -1,186 +1,47 @@
 {
-    "problem": {
-        "n_sources": 4,
-        "radius": 1.0,
-        "noise_level": 0.001
-    },
-    
-    "mesh": {
-        "resolution_forward": 0.05,
-        "resolution_inverse_linear": 0.08
-    },
-    
-    "sources_true": [
-        {"x": -0.3, "y": 0.4, "intensity": 1.0},
-        {"x": 0.5, "y": 0.3, "intensity": 1.0},
-        {"x": -0.4, "y": -0.4, "intensity": -1.0},
-        {"x": 0.3, "y": -0.5, "intensity": -1.0}
-    ],
-    
-    "solver": {
-        "method": "nonlinear",
-        "run_both": true
-    },
-    
-    "nonlinear": {
-        "_comment": "Choose optimizer from: differential_evolution, basinhopping, dual_annealing, shgo, L-BFGS-B, CG, BFGS, Newton-CG, SLSQP, trust-constr, Nelder-Mead, Powell",
-        "optimizer": "differential_evolution",
-        
-        "initial_guess": {
-            "_comment": "Strategy: 'random', 'circular', 'grid', 'custom'",
-            "strategy": "circular",
-            "random_seed": 42,
-            "custom_sources": [
-                {"x": 0.0, "y": 0.5, "intensity": 1.0},
-                {"x": 0.5, "y": 0.0, "intensity": 1.0},
-                {"x": 0.0, "y": -0.5, "intensity": -1.0},
-                {"x": -0.5, "y": 0.0, "intensity": -1.0}
-            ]
-        },
-        
-        "_comment_global": "=== GLOBAL OPTIMIZERS (derivative-free, avoid local minima) ===",
-        
-        "differential_evolution": {
-            "maxiter": 100,
-            "popsize": 15,
-            "tol": 1e-7,
-            "mutation": [0.5, 1.0],
-            "recombination": 0.7,
-            "seed": 42,
-            "polish": true,
-            "strategy": "best1bin"
-        },
-        
-        "basinhopping": {
-            "niter": 100,
-            "T": 1.0,
-            "stepsize": 0.3,
-            "seed": 42,
-            "interval": 50,
-            "niter_success": 10
-        },
-        
-        "dual_annealing": {
-            "maxiter": 1000,
-            "initial_temp": 5230.0,
-            "restart_temp_ratio": 2e-5,
-            "visit": 2.62,
-            "accept": -5.0,
-            "seed": 42,
-            "no_local_search": false
-        },
-        
-        "shgo": {
-            "n": 100,
-            "iters": 1,
-            "sampling_method": "simplicial"
-        },
-        
-        "_comment_local": "=== LOCAL OPTIMIZERS (gradient-based, fast but may find local minima) ===",
-        
-        "L-BFGS-B": {
-            "maxiter": 200,
-            "maxfun": 15000,
-            "ftol": 1e-9,
-            "gtol": 1e-7,
-            "eps": 1e-8,
-            "maxcor": 10
-        },
-        
-        "CG": {
-            "maxiter": 200,
-            "gtol": 1e-7,
-            "eps": 1e-8,
-            "norm": "inf"
-        },
-        
-        "BFGS": {
-            "maxiter": 200,
-            "gtol": 1e-7,
-            "eps": 1e-8,
-            "norm": "inf"
-        },
-        
-        "Newton-CG": {
-            "maxiter": 200,
-            "xtol": 1e-8,
-            "eps": 1e-8
-        },
-        
-        "SLSQP": {
-            "maxiter": 200,
-            "ftol": 1e-9,
-            "eps": 1e-8
-        },
-        
-        "trust-constr": {
-            "maxiter": 200,
-            "gtol": 1e-8,
-            "xtol": 1e-8,
-            "initial_tr_radius": 1.0,
-            "max_tr_radius": 1000.0
-        },
-        
-        "_comment_derivative_free_local": "=== LOCAL OPTIMIZERS (derivative-free) ===",
-        
-        "Nelder-Mead": {
-            "maxiter": 500,
-            "maxfev": 10000,
-            "xatol": 1e-8,
-            "fatol": 1e-8,
-            "adaptive": true
-        },
-        
-        "Powell": {
-            "maxiter": 500,
-            "maxfev": 10000,
-            "ftol": 1e-8,
-            "xtol": 1e-8
-        },
-        
-        "COBYLA": {
-            "maxiter": 1000,
-            "rhobeg": 0.5,
-            "tol": 1e-8
-        }
-    },
-    
-    "linear": {
-        "_comment": "regularization: 'l1' (sparse), 'l2' (Tikhonov), 'tv_admm', 'tv_primal_dual'",
-        "regularization": "tv_admm",
-        
-        "l2": {
-            "alpha": 1e-4
-        },
-        
-        "l1": {
-            "alpha": 1e-4,
-            "max_iter": 50
-        },
-        
-        "tv_admm": {
-            "_comment": "ADMM algorithm for TV: robust, easy to tune",
-            "alpha": 1e-3,
-            "rho": 1.0,
-            "max_iter": 200,
-            "tol": 1e-6
-        },
-        
-        "tv_primal_dual": {
-            "_comment": "Chambolle-Pock algorithm: often faster",
-            "alpha": 1e-3,
-            "tau": 0.1,
-            "sigma": 0.1,
-            "max_iter": 500,
-            "tol": 1e-6
-        }
-    },
-    
-    "visualization": {
-        "live_plot": false,
-        "update_interval": 5,
-        "save_results": true,
-        "output_dir": "results",
-        "plot_convergence": true
+  "forward": {
+    "method": "bem",
+    "n_boundary_points": 100,
+    "domain_type": "disk",
+    "domain_params": {
+      "radius": 1.0,
+      "a": 2.0,
+      "b": 1.0
     }
+  },
+  
+  "inverse": {
+    "method": "linear",
+    "regularization": "l1",
+    "alpha": 1e-4,
+    "n_sources": 4,
+    "optimizer": "L-BFGS-B",
+    "max_iter": 200,
+    "tolerance": 1e-6
+  },
+  
+  "grid": {
+    "n_radial": 10,
+    "n_angular": 20,
+    "r_min": 0.1,
+    "r_max": 0.9
+  },
+  
+  "tv": {
+    "algorithm": "chambolle_pock",
+    "tau": 0.1,
+    "sigma": 0.1,
+    "theta": 1.0,
+    "rho": 1.0,
+    "max_iter": 500,
+    "tol": 1e-5
+  },
+  
+  "visualization": {
+    "live_plot": false,
+    "plot_interval": 10,
+    "save_figures": true,
+    "figure_dir": "results",
+    "dpi": 150
+  }
 }
