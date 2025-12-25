@@ -123,16 +123,19 @@ Examples:
 
 def run_demo(args):
     """Run demonstration."""
-    from . import bem_solver, conformal_bem
+    try:
+        from . import analytical_solver, conformal_solver
+    except ImportError:
+        import analytical_solver, conformal_solver
     from .utils import create_test_sources, plot_recovery_comparison
     import matplotlib.pyplot as plt
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
     
-    if args.type in ('bem', 'all'):
+    if args.type in ('bem', 'analytical', 'all'):
         print("\n" + "="*60)
-        print("BEM DEMONSTRATION")
+        print("ANALYTICAL SOLVER DEMONSTRATION")
         print("="*60)
         
         # Create sources
@@ -144,15 +147,16 @@ def run_demo(args):
         ]
         
         # Forward solve
-        forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
+        forward = analytical_solver.AnalyticalForwardSolver(n_boundary_points=100)
         u_measured = forward.solve(sources_true)
         u_measured += 0.001 * np.random.randn(len(u_measured))
         
         # Nonlinear inverse
         print("\nNonlinear solver...")
-        inverse = bem_solver.BEMNonlinearInverseSolver(n_sources=4, n_boundary=100)
+        inverse = analytical_solver.AnalyticalNonlinearInverseSolver(n_sources=4, n_boundary=100)
         inverse.set_measured_data(u_measured)
-        sources_rec, _ = inverse.solve(method='L-BFGS-B', maxiter=100)
+        result = inverse.solve(method='L-BFGS-B', maxiter=100)
+        sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
         
         # Compute recovered boundary data
         u_rec = forward.solve(sources_rec)
@@ -168,18 +172,18 @@ def run_demo(args):
         # Plot
         theta = forward.theta
         fig = plot_recovery_comparison(sources_true, sources_rec, theta, u_measured, u_rec)
-        fig.savefig(output_dir / 'bem_demo.png', dpi=150, bbox_inches='tight')
-        print(f"\nSaved: {output_dir / 'bem_demo.png'}")
+        fig.savefig(output_dir / 'analytical_demo.png', dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {output_dir / 'analytical_demo.png'}")
         
         if args.type != 'all':
             plt.show()
     
     if args.type in ('conformal', 'all'):
         print("\n" + "="*60)
-        print("CONFORMAL BEM DEMONSTRATION (ELLIPSE)")
+        print("CONFORMAL SOLVER DEMONSTRATION (ELLIPSE)")
         print("="*60)
         
-        ellipse = conformal_bem.EllipseMap(a=2.0, b=1.0)
+        ellipse = conformal_solver.EllipseMap(a=2.0, b=1.0)
         
         sources_true = [
             ((-0.5, 0.3), 1.0),
@@ -188,13 +192,14 @@ def run_demo(args):
             ((0.5, -0.4), -1.0),
         ]
         
-        solver = conformal_bem.ConformalBEMSolver(ellipse, n_boundary=100)
-        u_measured = solver.solve_forward(sources_true)
+        solver = conformal_solver.ConformalForwardSolver(ellipse, n_boundary=100)
+        u_measured = solver.solve(sources_true)
         u_measured += 0.001 * np.random.randn(len(u_measured))
         
-        inverse = conformal_bem.ConformalNonlinearInverse(ellipse, n_sources=4, n_boundary=100)
+        inverse = conformal_solver.ConformalNonlinearInverseSolver(ellipse, n_sources=4, n_boundary=100)
         inverse.set_measured_data(u_measured)
-        sources_rec, _ = inverse.solve(method='L-BFGS-B', maxiter=100)
+        result = inverse.solve(method='L-BFGS-B', maxiter=100)
+        sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
         
         print("\nTrue sources:")
         for i, ((x, y), q) in enumerate(sources_true):
@@ -236,7 +241,10 @@ def run_demo(args):
 
 def run_solve(args):
     """Run inverse problem solver."""
-    from . import bem_solver
+    try:
+        from . import analytical_solver
+    except ImportError:
+        import analytical_solver
     from .config import get_config
     from .utils import create_test_sources, compute_source_error
     
@@ -257,7 +265,7 @@ def run_solve(args):
         print(f"  {i+1}: ({x:+.3f}, {y:+.3f}), q = {q:+.3f}")
     
     # Forward solve
-    forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
+    forward = analytical_solver.AnalyticalForwardSolver(n_boundary_points=100)
     u_clean = forward.solve(sources_true)
     u_measured = u_clean + args.noise * np.random.randn(len(u_clean))
     
@@ -266,7 +274,7 @@ def run_solve(args):
     # Linear inverse solve
     print(f"\nSolving with {args.method.upper()} regularization...")
     
-    linear = bem_solver.BEMLinearInverseSolver(n_boundary=100)
+    linear = analytical_solver.AnalyticalLinearInverseSolver(n_boundary=100)
     linear.build_greens_matrix()
     
     u_centered = u_measured - np.mean(u_measured)
@@ -335,7 +343,10 @@ def run_solve(args):
 
 def run_sweep(args):
     """Run parameter sweep."""
-    from . import bem_solver
+    try:
+        from . import analytical_solver
+    except ImportError:
+        import analytical_solver
     from .parameter_study import l_curve_analysis, plot_l_curve_comparison, save_results
     from .utils import create_test_sources
     
@@ -344,11 +355,11 @@ def run_sweep(args):
     # Create test problem
     sources_true = create_test_sources(4, seed=42)
     
-    forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
+    forward = analytical_solver.AnalyticalForwardSolver(n_boundary_points=100)
     u_measured = forward.solve(sources_true)
     u_measured += 0.001 * np.random.randn(len(u_measured))
     
-    linear = bem_solver.BEMLinearInverseSolver(n_boundary=100)
+    linear = analytical_solver.AnalyticalLinearInverseSolver(n_boundary=100)
     linear.build_greens_matrix()
     
     # Create alpha range

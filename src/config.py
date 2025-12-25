@@ -15,7 +15,7 @@ from pathlib import Path
 @dataclass
 class ForwardConfig:
     """Configuration for forward solver."""
-    method: str = "bem"  # "bem" or "fem"
+    method: str = "analytical"  # "analytical", "bem", or "fem"
     n_boundary_points: int = 100
     domain_type: str = "disk"  # "disk", "ellipse", "star"
     domain_params: Dict[str, float] = field(default_factory=lambda: {"radius": 1.0})

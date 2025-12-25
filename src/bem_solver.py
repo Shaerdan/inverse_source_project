@@ -397,6 +397,183 @@ class BEMLinearInverseSolver:
         return self.interior_points.copy()
 
 
+@dataclass
+class Source:
+    """Point source representation."""
+    x: float
+    y: float
+    intensity: float
+
+
+@dataclass
+class InverseResult:
+    """Result from nonlinear inverse solver."""
+    sources: List[Source]
+    residual: float
+    iterations: int
+    success: bool
+
+
+class BEMNonlinearInverseSolver:
+    """
+    Nonlinear inverse solver using BEM numerical forward solver.
+    
+    Optimizes both positions ξ and intensities q by minimizing the
+    data misfit ||u(ξ, q) - u_measured||².
+    
+    Parameters
+    ----------
+    n_sources : int
+        Number of sources to recover
+    n_boundary : int
+        Number of boundary measurement points
+    n_elements : int
+        Number of boundary elements for BEM
+    quadrature_order : int
+        Gaussian quadrature order
+    """
+    
+    def __init__(self, n_sources: int, n_boundary: int = 100, 
+                 n_elements: int = 64, quadrature_order: int = 6):
+        self.n_sources = n_sources
+        self.forward = BEMForwardSolver(n_elements=n_elements, 
+                                         quadrature_order=quadrature_order)
+        self.n_boundary = n_boundary
+        self.u_measured = None
+        self.history = []
+    
+    def set_measured_data(self, u_measured: np.ndarray):
+        """Set the boundary measurements to fit."""
+        self.u_measured = u_measured - np.mean(u_measured)
+    
+    def _params_to_sources(self, params: np.ndarray) -> List[Tuple[Tuple[float, float], float]]:
+        """Convert optimization parameters to source list."""
+        sources = []
+        for i in range(self.n_sources - 1):
+            sources.append(((params[3*i], params[3*i+1]), params[3*i+2]))
+        # Last source: position from params, intensity from compatibility
+        x_last, y_last = params[3*(self.n_sources-1)], params[3*(self.n_sources-1)+1]
+        q_last = -sum(q for _, q in sources)
+        sources.append(((x_last, y_last), q_last))
+        return sources
+    
+    def _objective(self, params: np.ndarray) -> float:
+        """Objective function: ||u_forward - u_measured||²"""
+        sources = self._params_to_sources(params)
+        
+        # Check all sources are inside the disk
+        for (x, y), _ in sources:
+            if x**2 + y**2 >= 0.9**2: 
+                return 1e10  # Penalty for sources outside domain
+        
+        u = self.forward.solve(sources)
+        u = u - np.mean(u)
+        misfit = np.sum((u - self.u_measured)**2)
+        self.history.append(misfit)
+        return misfit
+    
+    def _get_initial_guess(self, init_from: str, seed: int) -> List[float]:
+        """Generate initial guess for optimization."""
+        n = self.n_sources
+        x0 = []
+        
+        if init_from == 'random' or seed > 0:
+            np.random.seed(42 + seed)
+            for i in range(n):
+                r = 0.3 + 0.4 * np.random.rand()
+                angle = 2 * np.pi * np.random.rand()
+                x0.extend([r * np.cos(angle), r * np.sin(angle)])
+                if i < n - 1:
+                    x0.append(np.random.randn())
+        else:
+            # Symmetric initial guess on circle
+            for i in range(n):
+                angle = 2 * np.pi * i / n
+                x0.extend([0.5 * np.cos(angle), 0.5 * np.sin(angle)])
+                if i < n - 1: 
+                    x0.append(1.0 if i % 2 == 0 else -1.0)
+        
+        return x0
+    
+    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200,
+              n_restarts: int = 1, init_from: str = 'circle') -> InverseResult:
+        """
+        Solve the nonlinear inverse problem.
+        
+        Parameters
+        ----------
+        method : str
+            Optimization method:
+            - 'L-BFGS-B': Local quasi-Newton (fast, may get stuck)
+            - 'differential_evolution': Global stochastic (slower, more robust)
+            - 'basinhopping': Global with local polish
+        maxiter : int
+            Maximum iterations
+        n_restarts : int
+            Number of random restarts for local optimizers
+        init_from : str
+            Initial guess type: 'circle' or 'random'
+            
+        Returns
+        -------
+        result : InverseResult
+        """
+        from scipy.optimize import minimize, differential_evolution, basinhopping
+        
+        if self.u_measured is None:
+            raise ValueError("Must call set_measured_data() first")
+        
+        n = self.n_sources
+        n_params = 3 * n - 1  # 2 coords + 1 intensity per source, minus 1 for constraint
+        
+        # Bounds: positions in [-0.85, 0.85], intensities unbounded
+        bounds = []
+        for i in range(n):
+            bounds.extend([(-0.85, 0.85), (-0.85, 0.85)])
+            if i < n - 1:
+                bounds.append((-10, 10))
+        
+        best_result = None
+        best_misfit = np.inf
+        
+        if method.lower() == 'differential_evolution':
+            self.history = []
+            result = differential_evolution(self._objective, bounds, maxiter=maxiter,
+                                           seed=42, polish=True, workers=1)
+            best_result = result
+            best_misfit = result.fun
+            
+        elif method.lower() == 'basinhopping':
+            x0 = self._get_initial_guess(init_from, 0)
+            self.history = []
+            result = basinhopping(self._objective, x0, niter=maxiter,
+                                 minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds})
+            best_result = result
+            best_misfit = result.fun
+            
+        else:  # Local methods with restarts
+            for restart in range(n_restarts):
+                x0 = self._get_initial_guess(init_from, restart)
+                self.history = []
+                result = minimize(self._objective, x0, method=method,
+                                bounds=bounds, options={'maxiter': maxiter})
+                
+                if result.fun < best_misfit:
+                    best_misfit = result.fun
+                    best_result = result
+        
+        # Convert to sources
+        sources = self._params_to_sources(best_result.x)
+        source_objs = [Source(x=x, y=y, intensity=q) for (x, y), q in sources]
+        
+        return InverseResult(
+            sources=source_objs,
+            residual=np.sqrt(best_misfit),
+            iterations=best_result.nfev if hasattr(best_result, 'nfev') else maxiter,
+            success=best_result.success if hasattr(best_result, 'success') else True
+        )
+
+
 def validate_against_analytical(n_sources: int = 4, n_boundary: int = 64,
                                  noise_level: float = 0.0, seed: int = 42) -> dict:
     """

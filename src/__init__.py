@@ -92,6 +92,7 @@ from .analytical_solver import (
 from .bem_solver import (
     BEMForwardSolver as BEMNumericalForwardSolver,
     BEMLinearInverseSolver as BEMNumericalLinearInverseSolver,
+    BEMNonlinearInverseSolver as BEMNumericalNonlinearInverseSolver,
     BEMDiscretization,
     BEMResult,
     fundamental_solution_2d,

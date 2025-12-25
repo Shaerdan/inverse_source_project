@@ -4,9 +4,9 @@ Comprehensive Solver Comparison
 ===============================
 
 Compare all solver combinations:
-  - BEM Linear vs BEM Nonlinear
+  - Analytical Linear vs Analytical Nonlinear
   - FEM Linear vs FEM Nonlinear
-  - BEM vs FEM
+  - Analytical vs FEM
   - L1 vs L2 vs TV regularization
 
 Usage:
@@ -89,8 +89,13 @@ def compute_metrics(sources_true, sources_recovered, u_true, u_recovered) -> Dic
 
 
 def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> ComparisonResult:
-    """Run BEM linear inverse solver."""
-    from .bem_solver import BEMLinearInverseSolver, BEMForwardSolver
+    """Run analytical linear inverse solver (formerly called BEM)."""
+    try:
+        from .analytical_solver import AnalyticalLinearInverseSolver as BEMLinearInverseSolver
+        from .analytical_solver import AnalyticalForwardSolver as BEMForwardSolver
+    except ImportError:
+        from analytical_solver import AnalyticalLinearInverseSolver as BEMLinearInverseSolver
+        from analytical_solver import AnalyticalForwardSolver as BEMForwardSolver
     
     t0 = time()
     
@@ -125,7 +130,7 @@ def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> Compari
     metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
     
     return ComparisonResult(
-        solver_name=f"BEM Linear ({method.upper()})",
+        solver_name=f"Analytical Linear ({method.upper()})",
         method_type='linear',
         forward_type='bem',
         position_rmse=metrics['position_rmse'],
@@ -140,14 +145,19 @@ def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> Compari
 
 def run_bem_nonlinear(u_measured, sources_true, n_sources=4, 
                        optimizer='L-BFGS-B', n_restarts=1, seed=42) -> ComparisonResult:
-    """Run BEM nonlinear inverse solver.
+    """Run analytical nonlinear inverse solver (formerly called BEM).
     
     Parameters
     ----------
     seed : int
         Random seed for differential_evolution. Critical for reproducibility.
     """
-    from .bem_solver import BEMNonlinearInverseSolver, Source, InverseResult
+    try:
+        from .analytical_solver import AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
+        from .analytical_solver import Source, InverseResult
+    except ImportError:
+        from analytical_solver import AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
+        from analytical_solver import Source, InverseResult
     from scipy.optimize import differential_evolution
     
     t0 = time()
@@ -184,7 +194,7 @@ def run_bem_nonlinear(u_measured, sources_true, n_sources=4,
     u_true = u_measured - np.mean(u_measured)
     metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
     
-    name = f"BEM Nonlinear ({optimizer})"
+    name = f"Analytical Nonlinear ({optimizer})"
     if n_restarts > 1:
         name += f" x{n_restarts}"
     
@@ -358,6 +368,106 @@ def run_fem_nonlinear(u_measured, sources_true, n_sources=4,
     )
 
 
+def run_bem_numerical_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> ComparisonResult:
+    """Run BEM numerical linear inverse solver."""
+    try:
+        from .bem_solver import BEMLinearInverseSolver, BEMForwardSolver
+    except ImportError:
+        from bem_solver import BEMLinearInverseSolver, BEMForwardSolver
+    
+    t0 = time()
+    
+    linear = BEMLinearInverseSolver(n_boundary=len(u_measured), source_resolution=0.15, verbose=False)
+    linear.build_greens_matrix(verbose=False)
+    
+    if method == 'l1':
+        q = linear.solve_l1(u_measured, alpha=alpha)
+    elif method == 'l2':
+        q = linear.solve_l2(u_measured, alpha=alpha)
+    elif method in ('tv', 'tv_admm'):
+        q = linear.solve_tv(u_measured, alpha=alpha, method='admm')
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    elapsed = time() - t0
+    
+    # Extract significant sources
+    threshold = 0.1 * np.max(np.abs(q))
+    significant = np.where(np.abs(q) > threshold)[0]
+    
+    sources_rec = []
+    for idx in significant:
+        pos = linear.interior_points[idx]
+        sources_rec.append(((pos[0], pos[1]), q[idx]))
+    
+    # Compute metrics
+    u_rec = linear.G @ q
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    return ComparisonResult(
+        solver_name=f"BEM Numerical Linear ({method.upper()})",
+        method_type='linear',
+        forward_type='bem_numerical',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        grid_positions=linear.interior_points,
+        grid_intensities=q
+    )
+
+
+def run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=4, 
+                                 optimizer='L-BFGS-B', n_restarts=1, seed=42) -> ComparisonResult:
+    """Run BEM numerical nonlinear inverse solver."""
+    try:
+        from .bem_solver import BEMNonlinearInverseSolver, BEMForwardSolver
+    except ImportError:
+        from bem_solver import BEMNonlinearInverseSolver, BEMForwardSolver
+    from scipy.optimize import differential_evolution
+    
+    t0 = time()
+    
+    inverse = BEMNonlinearInverseSolver(n_sources=n_sources, n_boundary=len(u_measured))
+    inverse.set_measured_data(u_measured)
+    
+    if optimizer == 'differential_evolution':
+        result = inverse.solve(method='differential_evolution', maxiter=100)
+    else:
+        result = inverse.solve(method=optimizer, maxiter=100, n_restarts=n_restarts)
+    
+    elapsed = time() - t0
+    
+    # Convert sources
+    sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+    
+    # Compute recovered boundary data using BEM forward
+    forward = BEMForwardSolver(n_elements=64)
+    u_rec = forward.solve(sources_rec)
+    
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    name = f"BEM Numerical Nonlinear ({optimizer})"
+    if n_restarts > 1:
+        name += f" x{n_restarts}"
+    
+    return ComparisonResult(
+        solver_name=name,
+        method_type='nonlinear',
+        forward_type='bem_numerical',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        iterations=result.iterations,
+        sources_recovered=sources_rec
+    )
+
+
 def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
                         noise_level: float = 0.001,
                         alpha_linear: float = 1e-4,
@@ -386,9 +496,12 @@ def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
     -------
     results : list of ComparisonResult
     """
-    from .bem_solver import BEMForwardSolver
+    try:
+        from .analytical_solver import AnalyticalForwardSolver as BEMForwardSolver
+    except ImportError:
+        from analytical_solver import AnalyticalForwardSolver as BEMForwardSolver
     
-    # Generate synthetic data using BEM
+    # Generate synthetic data using analytical solver
     if verbose:
         print(f"Generating synthetic data (seed={seed})...")
     forward = BEMForwardSolver(n_boundary_points=100)
@@ -400,16 +513,16 @@ def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
     results = []
     
     # =========================================================================
-    # BEM LINEAR SOLVERS (L1, L2, TV)
+    # ANALYTICAL LINEAR SOLVERS (L1, L2, TV)
     # =========================================================================
     if verbose:
         print("\n" + "="*60)
-        print("BEM LINEAR SOLVERS")
+        print("ANALYTICAL LINEAR SOLVERS")
         print("="*60)
     
     for method in ['l1', 'l2', 'tv']:
         if verbose:
-            print(f"\nRunning BEM Linear ({method.upper()})...")
+            print(f"\nRunning Analytical Linear ({method.upper()})...")
         try:
             result = run_bem_linear(u_measured, sources_true, alpha=alpha_linear, method=method)
             results.append(result)
@@ -421,17 +534,17 @@ def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
                 print(f"  Failed: {e}")
     
     # =========================================================================
-    # BEM NONLINEAR SOLVERS
+    # ANALYTICAL NONLINEAR SOLVERS
     # =========================================================================
     if verbose:
         print("\n" + "="*60)
-        print("BEM NONLINEAR SOLVERS")
+        print("ANALYTICAL NONLINEAR SOLVERS")
         print("="*60)
     
     if quick:
         # Quick mode: L-BFGS-B with 5 restarts
         if verbose:
-            print(f"\nRunning BEM Nonlinear (L-BFGS-B x5)...")
+            print(f"\nRunning Analytical Nonlinear (L-BFGS-B x5)...")
         try:
             result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources, 
                                        optimizer='L-BFGS-B', n_restarts=5, seed=seed)
@@ -445,7 +558,7 @@ def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
     else:
         # Full mode: L-BFGS-B x5 + differential_evolution
         if verbose:
-            print(f"\nRunning BEM Nonlinear (L-BFGS-B x5)...")
+            print(f"\nRunning Analytical Nonlinear (L-BFGS-B x5)...")
         try:
             result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources, 
                                        optimizer='L-BFGS-B', n_restarts=5, seed=seed)
@@ -458,10 +571,81 @@ def compare_all_solvers(sources_true: List[Tuple[Tuple[float, float], float]],
                 print(f"  Failed: {e}")
         
         if verbose:
-            print(f"\nRunning BEM Nonlinear (differential_evolution, seed={seed})...")
+            print(f"\nRunning Analytical Nonlinear (differential_evolution, seed={seed})...")
         try:
             result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources, 
                                        optimizer='differential_evolution', seed=seed)
+            results.append(result)
+            if verbose:
+                print(f"  Position RMSE: {result.position_rmse:.4f}")
+                print(f"  Time: {result.time_seconds:.2f}s")
+        except Exception as e:
+            if verbose:
+                print(f"  Failed: {e}")
+    
+    # =========================================================================
+    # BEM NUMERICAL LINEAR SOLVERS (L1, L2, TV)
+    # =========================================================================
+    if verbose:
+        print("\n" + "="*60)
+        print("BEM NUMERICAL LINEAR SOLVERS")
+        print("="*60)
+    
+    for method in ['l1', 'l2', 'tv']:
+        if verbose:
+            print(f"\nRunning BEM Numerical Linear ({method.upper()})...")
+        try:
+            result = run_bem_numerical_linear(u_measured, sources_true, alpha=alpha_linear, method=method)
+            results.append(result)
+            if verbose:
+                print(f"  Position RMSE: {result.position_rmse:.4f}")
+                print(f"  Time: {result.time_seconds:.2f}s")
+        except Exception as e:
+            if verbose:
+                print(f"  Failed: {e}")
+    
+    # =========================================================================
+    # BEM NUMERICAL NONLINEAR SOLVERS
+    # =========================================================================
+    if verbose:
+        print("\n" + "="*60)
+        print("BEM NUMERICAL NONLINEAR SOLVERS")
+        print("="*60)
+    
+    if quick:
+        # Quick mode: L-BFGS-B with 5 restarts
+        if verbose:
+            print(f"\nRunning BEM Numerical Nonlinear (L-BFGS-B x5)...")
+        try:
+            result = run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=n_sources, 
+                                                  optimizer='L-BFGS-B', n_restarts=5, seed=seed)
+            results.append(result)
+            if verbose:
+                print(f"  Position RMSE: {result.position_rmse:.4f}")
+                print(f"  Time: {result.time_seconds:.2f}s")
+        except Exception as e:
+            if verbose:
+                print(f"  Failed: {e}")
+    else:
+        # Full mode: L-BFGS-B x5 + differential_evolution
+        if verbose:
+            print(f"\nRunning BEM Numerical Nonlinear (L-BFGS-B x5)...")
+        try:
+            result = run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=n_sources, 
+                                                  optimizer='L-BFGS-B', n_restarts=5, seed=seed)
+            results.append(result)
+            if verbose:
+                print(f"  Position RMSE: {result.position_rmse:.4f}")
+                print(f"  Time: {result.time_seconds:.2f}s")
+        except Exception as e:
+            if verbose:
+                print(f"  Failed: {e}")
+        
+        if verbose:
+            print(f"\nRunning BEM Numerical Nonlinear (differential_evolution, seed={seed})...")
+        try:
+            result = run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=n_sources, 
+                                                  optimizer='differential_evolution', seed=seed)
             results.append(result)
             if verbose:
                 print(f"  Position RMSE: {result.position_rmse:.4f}")
@@ -795,8 +979,20 @@ def compare_with_optimal_alpha(sources_true: List[Tuple[Tuple[float, float], flo
     -------
     results : list of ComparisonResult
     """
-    from .bem_solver import BEMForwardSolver, BEMLinearInverseSolver, BEMNonlinearInverseSolver
-    from .fem_solver import FEMLinearInverseSolver, FEMNonlinearInverseSolver
+    try:
+        from .analytical_solver import (
+            AnalyticalForwardSolver as BEMForwardSolver,
+            AnalyticalLinearInverseSolver as BEMLinearInverseSolver,
+            AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
+        )
+        from .fem_solver import FEMLinearInverseSolver, FEMNonlinearInverseSolver
+    except ImportError:
+        from analytical_solver import (
+            AnalyticalForwardSolver as BEMForwardSolver,
+            AnalyticalLinearInverseSolver as BEMLinearInverseSolver,
+            AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
+        )
+        from fem_solver import FEMLinearInverseSolver, FEMNonlinearInverseSolver
     from scipy.interpolate import interp1d
     
     if methods is None:
@@ -818,7 +1014,7 @@ def compare_with_optimal_alpha(sources_true: List[Tuple[Tuple[float, float], flo
     results = []
     
     # =========================================================================
-    # BEM LINEAR - Find optimal α for each method
+    # ANALYTICAL LINEAR - Find optimal α for each method
     # =========================================================================
     if verbose:
         print("\n" + "-"*70)
@@ -904,7 +1100,7 @@ def compare_with_optimal_alpha(sources_true: List[Tuple[Tuple[float, float], flo
         
         method_name = method.upper().replace('_', '-')
         results.append(ComparisonResult(
-            solver_name=f"BEM Linear ({method_name})",
+            solver_name=f"Analytical Linear ({method_name})",
             method_type='linear',
             forward_type='bem',
             position_rmse=metrics['position_rmse'],
