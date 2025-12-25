@@ -68,6 +68,14 @@ from .bem_solver import (
 )
 
 # =============================================================================
+# MESH GENERATION (shared by FEM and BEM linear)
+# =============================================================================
+from .mesh import (
+    create_disk_mesh,
+    get_source_grid,
+)
+
+# =============================================================================
 # FEM SOLVERS (Finite Element - mesh-based)
 # =============================================================================
 from .fem_solver import (
@@ -77,10 +85,8 @@ from .fem_solver import (
     FEMLinearInverseSolver,
     # Inverse - Nonlinear (continuous positions)
     FEMNonlinearInverseSolver,
-    # Mesh utilities
-    create_disk_mesh_scipy,
     # Low-level solve
-    solve_poisson_scipy,
+    solve_poisson,
     generate_synthetic_data_fem,
 )
 
@@ -165,6 +171,7 @@ from .comparison import (
 # =============================================================================
 # MODULE IMPORTS (for inverse_source.bem_solver style access)
 # =============================================================================
+from . import mesh
 from . import bem_solver
 from . import conformal_bem
 from . import fem_solver
@@ -189,12 +196,15 @@ __all__ = [
     'greens_function_disk_neumann',
     'generate_synthetic_data',
     
+    # Mesh
+    'create_disk_mesh',
+    'get_source_grid',
+    
     # FEM
     'FEMForwardSolver',
     'FEMLinearInverseSolver',
     'FEMNonlinearInverseSolver',
-    'create_disk_mesh_scipy',
-    'solve_poisson_scipy',
+    'solve_poisson',
     'generate_synthetic_data_fem',
     
     # Conformal
@@ -247,6 +257,7 @@ __all__ = [
     'ComparisonResult',
     
     # Modules
+    'mesh',
     'bem_solver',
     'conformal_bem',
     'fem_solver',

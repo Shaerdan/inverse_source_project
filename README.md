@@ -1,72 +1,17 @@
-# Inverse Source Localization Package
+# Inverse Source Localization
 
-A comprehensive toolkit for inverse source localization in 2D domains using Boundary Element Methods (BEM) and Finite Element Methods (FEM).
+A Python package for recovering point source locations and intensities from boundary measurements using the Poisson equation with zero Neumann boundary conditions.
 
-## Mathematical Problem
+## Problem Statement
 
-We solve the inverse problem for the Poisson equation with point sources:
+Given boundary measurements `u(x)` on `∂Ω`, recover point sources `{(ξₖ, qₖ)}` satisfying:
 
 ```
--Δu = Σₖ qₖ δ(x - ξₖ)    in Ω
-∂u/∂n = 0                 on ∂Ω
+-Δu = Σₖ qₖ δ(x - ξₖ)  in Ω
+∂u/∂n = 0              on ∂Ω
 ```
 
-**Compatibility condition**: Σₖ qₖ = 0 (conservation)
-
-**Goal**: Given boundary measurements u|∂Ω, recover source locations ξₖ and intensities qₖ.
-
-## Package Architecture
-
-### Two Formulations × Two Methods = Four Solver Combinations
-
-|  | **BEM** (Analytical) | **FEM** (Numerical) |
-|--|----------------------|---------------------|
-| **Linear** (Grid) | `BEMLinearInverseSolver` | `FEMLinearInverseSolver` |
-| **Nonlinear** (Continuous) | `BEMNonlinearInverseSolver` | `FEMNonlinearInverseSolver` |
-
-### Linear vs Nonlinear Formulation
-
-| Aspect | Linear (Distributional) | Nonlinear (Continuous) |
-|--------|------------------------|------------------------|
-| Source positions | Fixed to grid | Continuous optimization |
-| Variables | Intensities q ∈ ℝᴹ | Positions + intensities (ξₖ, qₖ) |
-| Problem type | Convex (unique minimum) | Non-convex (local minima) |
-| # Sources | Don't need to know | Must specify N |
-| Regularization | Essential (ill-posed) | Optional |
-| Accuracy | Limited by grid | Exact positions possible |
-
-### BEM vs FEM
-
-| Aspect | BEM | FEM |
-|--------|-----|-----|
-| Green's function | Analytical | Computed numerically |
-| Mesh required | No (boundary only) | Yes (domain mesh) |
-| Speed | Fast | Slower |
-| Domain flexibility | Unit disk + conformal maps | Any mesh |
-| Source handling | Always continuous | Barycentric interpolation |
-
-## Features
-
-### Solvers
-- **BEM**: Analytical Green's function for unit disk (mesh-free)
-- **Conformal BEM**: General simply connected domains via conformal mapping
-  - Ellipse (Joukowsky map)
-  - Star-shaped domains (numerical conformal map)
-- **FEM**: Triangular mesh with P1 elements (scipy-based, DOLFINx optional)
-
-### Regularization (for Linear Inverse)
-- **L2 (Tikhonov)**: Smooth solutions - closed form
-- **L1 (Sparsity)**: Sparse solutions via IRLS algorithm (best for point sources)
-- **TV (Total Variation)**: Piecewise constant solutions
-  - Chambolle-Pock primal-dual algorithm
-  - ADMM (Alternating Direction Method of Multipliers)
-
-### Tools
-- JSON/YAML configuration system
-- Parameter sweep and L-curve analysis
-- Source error metrics computation
-- Comprehensive plotting utilities
-- Command-line interface
+with the compatibility condition `Σₖ qₖ = 0`.
 
 ## Installation
 
@@ -75,21 +20,137 @@ We solve the inverse problem for the Poisson equation with point sources:
 git clone https://github.com/Shaerdan/inverse_source_project.git
 cd inverse_source_project
 
-# Install dependencies
-pip install numpy scipy matplotlib pyyaml
-
-# Install package in development mode
+# Install in development mode
 pip install -e .
+
+# Optional: Install gmsh for better mesh generation
+pip install gmsh
 ```
 
 ## Quick Start
 
-### BEM Nonlinear Inverse (Recommended for Point Sources)
+```bash
+# Run comparison with optimal regularization parameters (recommended)
+python -m inverse_source.cli compare --optimal
+
+# Quick comparison (fixed α, faster)
+python -m inverse_source.cli compare --quick
+
+# Show package info
+python -m inverse_source.cli info
+```
+
+## Architecture
+
+### Two Approaches
+
+| Approach | Description | Pros | Cons |
+|----------|-------------|------|------|
+| **Linear (Distributed)** | Sources on fixed grid, solve for intensities `q ∈ ℝᴹ` | Convex problem, global optimum | Grid-constrained positions |
+| **Nonlinear (Continuous)** | Optimize both positions `ξ` and intensities `q` | Exact positions possible | Non-convex, local minima |
+
+### Two Forward Methods
+
+| Method | Description | When to Use |
+|--------|-------------|-------------|
+| **BEM** | Analytical Green's function | Unit disk (exact, fast) |
+| **FEM** | Finite element discretization | General domains, validation |
+
+### Solver Classes
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        mesh.py (shared)                         │
+│  Uniform triangular mesh generation (gmsh or fallback)          │
+└─────────────────────────────────────────────────────────────────┘
+                    │                           │
+                    ▼                           ▼
+┌─────────────────────────────┐   ┌─────────────────────────────┐
+│        fem_solver.py        │   │        bem_solver.py        │
+│                             │   │                             │
+│  FEMForwardSolver           │   │  BEMForwardSolver           │
+│  FEMLinearInverseSolver     │   │  BEMLinearInverseSolver     │
+│  FEMNonlinearInverseSolver  │   │  BEMNonlinearInverseSolver  │
+└─────────────────────────────┘   └─────────────────────────────┘
+```
+
+## Regularization Methods
+
+### Linear Solvers
+
+| Method | Algorithm | Best For | Function |
+|--------|-----------|----------|----------|
+| **L2 (Tikhonov)** | Closed-form | Smooth solutions | `solve_l2(u, alpha)` |
+| **L1 (Sparsity)** | IRLS | Sparse point sources | `solve_l1(u, alpha)` |
+| **TV-ADMM** | ADMM | Piecewise constant | `solve_tv(u, alpha, method='admm')` |
+| **TV-CP** | Chambolle-Pock | Piecewise constant | `solve_tv(u, alpha, method='chambolle_pock')` |
+
+### Nonlinear Solvers
+
+| Optimizer | Type | Characteristics |
+|-----------|------|-----------------|
+| `L-BFGS-B` | Local | Fast, may get stuck in local minima |
+| `differential_evolution` | Global | Slower, more robust |
+| `basinhopping` | Hybrid | Global search + local polish |
+
+## CLI Reference
+
+### Commands
+
+```bash
+# Compare all solvers
+python -m inverse_source.cli compare [options]
+
+# Run demos
+python -m inverse_source.cli demo --type [bem|conformal|all]
+
+# Single solve
+python -m inverse_source.cli solve --method [l1|l2|tv] --alpha 1e-4
+
+# Parameter sweep
+python -m inverse_source.cli sweep --method all --plot
+
+# Configuration
+python -m inverse_source.cli config --template default --output config.json
+
+# Package info
+python -m inverse_source.cli info
+```
+
+### Compare Options
+
+```bash
+# Optimal α comparison (L-curve selection for each method) - RECOMMENDED
+python -m inverse_source.cli compare --optimal
+
+# Quick comparison (fixed α, L-BFGS-B only for nonlinear)
+python -m inverse_source.cli compare --quick
+
+# Specific methods only
+python -m inverse_source.cli compare --optimal --methods l1 tv_admm tv_cp
+
+# Skip nonlinear solvers
+python -m inverse_source.cli compare --optimal --no-nonlinear
+
+# Custom noise level
+python -m inverse_source.cli compare --optimal --noise 0.01
+
+# Save figure
+python -m inverse_source.cli compare --optimal --save results/comparison.png
+```
+
+## Python API
+
+### Basic Usage
 
 ```python
-from inverse_source import bem_solver
+from inverse_source import (
+    BEMForwardSolver, BEMLinearInverseSolver, BEMNonlinearInverseSolver,
+    FEMForwardSolver, FEMLinearInverseSolver, FEMNonlinearInverseSolver
+)
+import numpy as np
 
-# Define true sources (position, intensity) - must sum to zero
+# Define true sources: [((x, y), intensity), ...]
 sources_true = [
     ((-0.3, 0.4), 1.0),
     ((0.5, 0.3), 1.0),
@@ -97,238 +158,145 @@ sources_true = [
     ((0.3, -0.5), -1.0),
 ]
 
-# Forward solve
-forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
+# Generate synthetic measurements
+forward = BEMForwardSolver(n_boundary_points=100)
 u_measured = forward.solve(sources_true)
-
-# Add noise
-import numpy as np
-u_measured += 0.001 * np.random.randn(len(u_measured))
-
-# Nonlinear inverse (continuous source positions)
-inverse = bem_solver.BEMNonlinearInverseSolver(n_sources=4, n_boundary=100)
-inverse.set_measured_data(u_measured)
-result = inverse.solve(method='L-BFGS-B')
-
-# Access recovered sources
-for s in result.sources:
-    print(f"Position: ({s.x:.3f}, {s.y:.3f}), Intensity: {s.intensity:.3f}")
+u_measured += 0.001 * np.random.randn(len(u_measured))  # Add noise
 ```
 
-### BEM Linear Inverse (Grid-Based with Regularization)
+### Linear Inverse (BEM)
 
 ```python
-from inverse_source import bem_solver
-
-# Forward solve (same as above)
-forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
-u_measured = forward.solve(sources_true)
-
-# Linear inverse (sources on grid)
-linear = bem_solver.BEMLinearInverseSolver(
-    n_boundary=100,
-    n_interior_radial=10,
-    n_interior_angular=20
-)
+# Setup solver
+linear = BEMLinearInverseSolver(n_boundary=100, source_resolution=0.15)
 linear.build_greens_matrix()
 
-# Solve with L1 regularization (sparsity-promoting)
-q = linear.solve_l1(u_measured, alpha=1e-4)
+# Solve with different regularizations
+q_l1 = linear.solve_l1(u_measured, alpha=1e-4)
+q_l2 = linear.solve_l2(u_measured, alpha=1e-4)
+q_tv_admm = linear.solve_tv(u_measured, alpha=1e-4, method='admm')
+q_tv_cp = linear.solve_tv(u_measured, alpha=1e-4, method='chambolle_pock')
 
-# Find significant sources
-threshold = 0.1 * np.max(np.abs(q))
-significant_idx = np.where(np.abs(q) > threshold)[0]
-positions = linear.interior_points[significant_idx]
+# Extract significant sources
+threshold = 0.1 * np.abs(q_l1).max()
+significant = np.where(np.abs(q_l1) > threshold)[0]
+for idx in significant:
+    pos = linear.interior_points[idx]
+    print(f"Source at ({pos[0]:.3f}, {pos[1]:.3f}), q = {q_l1[idx]:.3f}")
 ```
 
-### FEM Nonlinear Inverse (Continuous Positions)
+### Nonlinear Inverse (BEM)
 
 ```python
-from inverse_source import fem_solver
+# Setup solver
+nonlinear = BEMNonlinearInverseSolver(n_sources=4, n_boundary=100)
+nonlinear.set_measured_data(u_measured)
 
-# Forward solve with FEM
-forward = fem_solver.FEMForwardSolver(n_radial=15, n_angular=30)
-u_measured = forward.solve(sources_true)
+# Solve (choose optimizer)
+result = nonlinear.solve(method='differential_evolution', maxiter=200)
+# Or with multi-start local optimizer:
+# result = nonlinear.solve(method='L-BFGS-B', n_restarts=5)
 
-# Nonlinear inverse
-inverse = fem_solver.FEMNonlinearInverseSolver(n_sources=4, n_radial=15, n_angular=30)
-inverse.set_measured_data(u_measured)
-result = inverse.solve(method='L-BFGS-B')
+# Print results
+for s in result.sources:
+    print(f"Source at ({s.x:.3f}, {s.y:.3f}), q = {s.intensity:.3f}")
+print(f"Residual: {result.residual:.6e}")
 ```
 
-### FEM Linear Inverse (Grid-Based)
+### Linear Inverse (FEM)
 
 ```python
-from inverse_source import fem_solver
+# FEM uses two mesh resolutions: forward (finer) and source candidates (coarser)
+fem_linear = FEMLinearInverseSolver(
+    forward_resolution=0.1,   # FEM discretization
+    source_resolution=0.15    # Source candidate grid
+)
+fem_linear.build_greens_matrix()
 
-# Linear inverse with FEM
-linear = fem_solver.FEMLinearInverseSolver(n_radial=15, n_angular=30)
-q = linear.solve_l1(u_measured, alpha=1e-3)
+# Same solve methods as BEM
+q = fem_linear.solve_l1(u_fem, alpha=1e-3)
 ```
 
-### Conformal BEM (General Domains)
+### Optimal α Selection
 
 ```python
-from inverse_source import conformal_bem
+from inverse_source.comparison import find_optimal_alpha
 
-# Ellipse domain (a=2, b=1)
-ellipse = conformal_bem.EllipseMap(a=2.0, b=1.0)
+# Find optimal α via L-curve
+alpha_opt, sweep_data = find_optimal_alpha(
+    linear, u_measured, method='l1', verbose=True
+)
+print(f"Optimal α: {alpha_opt:.2e}")
 
-# Forward solve
-solver = conformal_bem.ConformalBEMSolver(ellipse, n_boundary=100)
-u_measured = solver.solve_forward(sources_true)
-
-# Nonlinear inverse
-inverse = conformal_bem.ConformalNonlinearInverse(ellipse, n_sources=4)
-inverse.set_measured_data(u_measured)
-result = inverse.solve()
+# Solve with optimal α
+q = linear.solve_l1(u_measured, alpha=alpha_opt)
 ```
 
-### Command Line Interface
-
-```bash
-# Run demo
-python -m inverse_source.cli demo --type bem
-
-# Solve with specific parameters
-python -m inverse_source.cli solve --method l1 --alpha 1e-4
-
-# Parameter sweep with L-curve analysis
-python -m inverse_source.cli sweep --method all --plot
-
-# Show available config templates
-python -m inverse_source.cli config --list-templates
-
-# Package info
-python -m inverse_source.cli info
-```
-
-### Using Configuration Files
+### Full Comparison with Optimal α
 
 ```python
-from inverse_source.config import Config
+from inverse_source.comparison import (
+    compare_with_optimal_alpha,
+    print_comparison_table, 
+    plot_comparison
+)
 
-# Load YAML config
-config = Config.load('Config/config.yaml')
+# Comparison with optimal α for each method (recommended)
+results = compare_with_optimal_alpha(
+    sources_true, 
+    noise_level=0.001,
+    methods=['l1', 'l2', 'tv_admm', 'tv_cp'],
+    include_nonlinear=True
+)
 
-# Access parameters
-print(config.inverse.regularization)  # 'l1'
-print(config.inverse.alpha)           # 1e-4
-print(config.grid.n_radial)           # 10
-
-# Use with solver
-from inverse_source import bem_solver
-forward = bem_solver.BEMForwardSolver(n_boundary_points=config.forward.n_boundary_points)
+print_comparison_table(results)
+plot_comparison(results, sources_true, save_path='comparison.png')
 ```
 
-## Project Structure
+## File Structure
 
 ```
 inverse_source_project/
 ├── src/
-│   ├── __init__.py           # Package exports
-│   ├── bem_solver.py         # BEM forward + linear/nonlinear inverse
-│   ├── fem_solver.py         # FEM forward + linear/nonlinear inverse
-│   ├── conformal_bem.py      # Conformal mapping for general domains
-│   ├── regularization.py     # L1, L2, TV algorithms
-│   ├── parameter_study.py    # Parameter sweeps and L-curve analysis
-│   ├── config.py             # JSON/YAML configuration system
-│   ├── utils.py              # Plotting and utilities
-│   └── cli.py                # Command-line interface
+│   ├── __init__.py         # Package exports
+│   ├── mesh.py             # Uniform triangular mesh generation
+│   ├── bem_solver.py       # BEM forward and inverse solvers
+│   ├── fem_solver.py       # FEM forward and inverse solvers
+│   ├── conformal_bem.py    # Conformal mapping for general domains
+│   ├── regularization.py   # L1, L2, TV algorithms (standalone)
+│   ├── comparison.py       # Solver comparison utilities
+│   ├── parameter_study.py  # L-curve analysis
+│   ├── config.py           # Configuration management
+│   ├── utils.py            # Plotting and helper functions
+│   └── cli.py              # Command-line interface
 ├── Config/
-│   └── config.yaml           # Configuration file with all options
-├── docs/
-│   ├── main.tex              # LaTeX documentation
-│   ├── references.bib        # Bibliography
-│   └── main.pdf              # Compiled documentation
-├── examples/
-│   └── complete_example.py   # Comprehensive usage examples
-├── results/                  # Output directory for figures
-├── pyproject.toml            # Package configuration
-├── requirements.txt          # Dependencies
+│   └── config.yaml         # Default configuration
+├── tests/                  # Unit tests
+├── examples/               # Example scripts
+├── docs/                   # Documentation
+├── pyproject.toml          # Package metadata
 └── README.md
 ```
 
-## Solver Reference
+## Key Findings
 
-### Forward Solvers
+Based on parameter studies:
 
-| Class | Description |
-|-------|-------------|
-| `BEMForwardSolver` | Analytical Green's function for unit disk |
-| `FEMForwardSolver` | Scipy-based FEM (DOLFINx optional) |
-| `ConformalBEMSolver` | BEM for general domains via conformal map |
+1. **L1 outperforms TV for point sources**: L1 promotes sparsity (discrete sources), TV promotes piecewise constant regions which doesn't match point source physics
+2. **Optimal α selection is critical**: Use L-curve method (`--optimal` flag), not arbitrary values
+3. **Nonlinear solvers need global search**: `differential_evolution` significantly outperforms `L-BFGS-B` for avoiding local minima
+4. **BEM ≈ FEM accuracy**: Both give similar results on unit disk; BEM is faster due to analytical Green's function
 
-### Inverse Solvers
+## Dependencies
 
-| Class | Type | Description |
-|-------|------|-------------|
-| `BEMLinearInverseSolver` | Linear | Grid-based, L1/L2/TV regularization |
-| `BEMNonlinearInverseSolver` | Nonlinear | Continuous positions, gradient optimization |
-| `FEMLinearInverseSolver` | Linear | FEM-based Green's matrix |
-| `FEMNonlinearInverseSolver` | Nonlinear | FEM forward in optimization loop |
-| `ConformalLinearInverse` | Linear | General domains |
-| `ConformalNonlinearInverse` | Nonlinear | General domains |
+- **Required**: numpy, scipy, matplotlib
+- **Optional**: gmsh (better mesh generation), pyyaml (config files)
 
-### Regularization Methods
+## References
 
-| Method | Function | Best For |
-|--------|----------|----------|
-| L2 (Tikhonov) | `solve_l2()` | Smooth distributed sources |
-| L1 (Sparsity) | `solve_l1()` | Point sources (recommended) |
-| TV (Total Variation) | `solve_tv()` | Piecewise constant regions |
-
-## Mathematical Details
-
-### BEM: Analytical Green's Function
-
-For the unit disk with Neumann boundary conditions:
-
-```
-G(x, ξ) = -1/(2π) [ln|x - ξ| + ln|x - ξ*| - ln|ξ|]
-```
-
-where ξ* = ξ/|ξ|² is the image point (method of images).
-
-### FEM: Continuous Source Positions
-
-Sources at arbitrary positions ξₖ are handled via barycentric interpolation:
-
-1. Find element containing ξₖ
-2. Compute barycentric coordinates (λ₁, λ₂, λ₃)
-3. Distribute source to vertices: fᵢ = qₖ · λᵢ
-
-This allows **continuous optimization** over source positions.
-
-### Linear Inverse: Regularized Least Squares
-
-```
-min_q ||Gq - u||² + α·R(q)
-```
-
-where R(q) is:
-- L2: ||q||²
-- L1: ||q||₁
-- TV: ||Dq||₁
-
-### Nonlinear Inverse: Direct Optimization
-
-```
-min_{ξ,q} ||u(ξ,q) - u_measured||²
-
-subject to: Σqₖ = 0, ξₖ ∈ Ω
-```
-
-## Citation
-
-```bibtex
-@software{inverse_source_localization,
-  author = {Serdan},
-  title = {Inverse Source Localization Package},
-  year = {2025},
-  url = {https://github.com/Shaerdan/inverse_source_project}
-}
-```
+- Stakgold, I. "Green's Functions and Boundary Value Problems"
+- Chambolle, A., & Pock, T. (2011). "A first-order primal-dual algorithm"
+- Boyd, S., et al. (2011). "Distributed Optimization and Statistical Learning via ADMM"
 
 ## License
 
@@ -336,4 +304,4 @@ MIT License
 
 ## Author
 
-Serdan (https://github.com/Shaerdan)
+Serdan - [GitHub](https://github.com/Shaerdan)

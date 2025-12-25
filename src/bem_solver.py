@@ -5,7 +5,10 @@ Boundary Element Method Solver for Poisson Equation with Point Sources
 This module implements BEM-based forward and inverse solvers using the
 analytical Neumann Green's function for the unit disk.
 
-Key advantage: Source positions are truly continuous - no mesh required!
+Key advantages:
+    - Source positions are truly continuous (no mesh required for forward)
+    - Analytical Green's function = fast and accurate
+    - Source candidate grid uses same uniform mesh type as FEM (for consistency)
 
 References:
     - Stakgold, I. "Green's Functions and Boundary Value Problems"
@@ -17,6 +20,9 @@ from scipy.optimize import minimize, differential_evolution
 from scipy.spatial import Delaunay
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
+
+# Import shared mesh for source candidate grid
+from .mesh import create_disk_mesh, get_source_grid
 
 
 @dataclass
@@ -111,54 +117,108 @@ class BEMForwardSolver:
 
 
 class BEMLinearInverseSolver:
-    """Linear inverse solver with L1, L2, and TV regularization."""
+    """
+    Linear inverse solver with L1, L2, and TV regularization.
     
-    def __init__(self, n_boundary: int = 100, n_interior_radial: int = 10, n_interior_angular: int = 20):
+    Uses uniform triangular mesh (same as FEM) for source candidate grid.
+    
+    Parameters
+    ----------
+    n_boundary : int
+        Number of boundary measurement points
+    source_resolution : float
+        Mesh resolution for source candidate grid (larger = coarser = fewer candidates)
+    verbose : bool
+        Print info. Default True
+    """
+    
+    def __init__(self, n_boundary: int = 100, source_resolution: float = 0.15, verbose: bool = True):
         self.n_boundary = n_boundary
         self.theta_boundary = np.linspace(0, 2*np.pi, n_boundary, endpoint=False)
-        self.boundary_points = np.column_stack([np.cos(self.theta_boundary), np.sin(self.theta_boundary)])
+        self.boundary_points = np.column_stack([
+            np.cos(self.theta_boundary), 
+            np.sin(self.theta_boundary)
+        ])
         
-        r_values = np.linspace(0.1, 0.9, n_interior_radial)
-        theta_values = np.linspace(0, 2*np.pi, n_interior_angular, endpoint=False)
-        self.interior_points = np.array([[r*np.cos(t), r*np.sin(t)] for r in r_values for t in theta_values])
+        # Use shared mesh for source candidates (same type as FEM)
+        self.interior_points = get_source_grid(resolution=source_resolution, radius=0.9)
         self.n_interior = len(self.interior_points)
         self.G = None
+        self._verbose = verbose
         
-    def build_greens_matrix(self):
+        if verbose:
+            print(f"BEM Linear: {n_boundary} boundary, {self.n_interior} source candidates")
+        
+    def build_greens_matrix(self, verbose: bool = None):
         """Build the Green's matrix analytically."""
-        print(f"Building Green's matrix ({self.n_boundary} x {self.n_interior})...")
+        if verbose is None:
+            verbose = self._verbose
+        if verbose:
+            print(f"Building Green's matrix ({self.n_boundary} x {self.n_interior})...")
         self.G = np.zeros((self.n_boundary, self.n_interior))
         for j in range(self.n_interior):
             self.G[:, j] = greens_function_disk_neumann(self.boundary_points, self.interior_points[j])
         self.G = self.G - np.mean(self.G, axis=0, keepdims=True)
-        print("Done.")
+        if verbose:
+            print("Done.")
     
     def solve_l2(self, u_measured: np.ndarray, alpha: float = 1e-4) -> np.ndarray:
         """Solve with Tikhonov (L2) regularization."""
-        if self.G is None: self.build_greens_matrix()
+        if self.G is None: 
+            self.build_greens_matrix()
         u = u_measured - np.mean(u_measured)
         q = np.linalg.solve(self.G.T @ self.G + alpha * np.eye(self.n_interior), self.G.T @ u)
         return q - np.mean(q)
     
     def solve_l1(self, u_measured: np.ndarray, alpha: float = 1e-4, max_iter: int = 50) -> np.ndarray:
         """Solve with L1 (sparsity) regularization via IRLS."""
-        if self.G is None: self.build_greens_matrix()
+        if self.G is None: 
+            self.build_greens_matrix()
         u = u_measured - np.mean(u_measured)
-        q, eps = np.zeros(self.n_interior), 1e-4
-        GtG, Gtu = self.G.T @ self.G, self.G.T @ u
+        q = np.zeros(self.n_interior)
+        eps = 1e-4
+        GtG = self.G.T @ self.G
+        Gtu = self.G.T @ u
         
         for _ in range(max_iter):
             W = np.diag(1.0 / (np.abs(q) + eps))
             q_new = np.linalg.solve(GtG + alpha * W, Gtu)
-            if np.linalg.norm(q_new - q) < 1e-6: break
+            if np.linalg.norm(q_new - q) < 1e-6: 
+                break
             q = q_new
         return q - np.mean(q)
     
-    def solve_tv(self, u_measured: np.ndarray, alpha: float = 1e-4, rho: float = 1.0, max_iter: int = 100) -> np.ndarray:
-        """Solve with Total Variation regularization via ADMM."""
-        if self.G is None: self.build_greens_matrix()
+    def solve_tv(self, u_measured: np.ndarray, alpha: float = 1e-4, 
+                 method: str = 'admm', rho: float = 1.0, max_iter: int = 100,
+                 verbose: bool = False) -> np.ndarray:
+        """
+        Solve with Total Variation regularization.
+        
+        Parameters
+        ----------
+        u_measured : array
+            Boundary measurements
+        alpha : float
+            Regularization parameter
+        method : str
+            'admm' or 'chambolle_pock' (or 'cp')
+        rho : float
+            ADMM penalty parameter (for ADMM)
+        max_iter : int
+            Maximum iterations
+        verbose : bool
+            Print convergence info
+            
+        Returns
+        -------
+        q : array
+            Recovered source intensities
+        """
+        if self.G is None: 
+            self.build_greens_matrix()
         u = u_measured - np.mean(u_measured)
         
+        # Build gradient on triangulated source mesh
         tri = Delaunay(self.interior_points)
         edges = set()
         for s in tri.simplices:
@@ -169,17 +229,39 @@ class BEMLinearInverseSolver:
         for k, (i, j) in enumerate(edges):
             D[k, i], D[k, j] = 1, -1
         
-        q, z, w = np.zeros(self.n_interior), np.zeros(len(edges)), np.zeros(len(edges))
-        A_inv = np.linalg.inv(self.G.T @ self.G + rho * D.T @ D)
-        Gtu = self.G.T @ u
+        if method.lower() in ('admm', 'tv_admm'):
+            # ADMM implementation
+            q = np.zeros(self.n_interior)
+            z = np.zeros(len(edges))
+            w = np.zeros(len(edges))
+            A_inv = np.linalg.inv(self.G.T @ self.G + rho * D.T @ D)
+            Gtu = self.G.T @ u
+            
+            for it in range(max_iter):
+                q = A_inv @ (Gtu + rho * D.T @ (z - w))
+                Dq = D @ q
+                z = np.sign(Dq + w) * np.maximum(np.abs(Dq + w) - alpha/rho, 0)
+                w = w + Dq - z
+                
+                if verbose and it % 20 == 0:
+                    energy = 0.5 * np.linalg.norm(self.G @ q - u)**2 + alpha * np.sum(np.abs(D @ q))
+                    print(f"  ADMM iter {it}: energy = {energy:.6e}")
         
-        for _ in range(max_iter):
-            q = A_inv @ (Gtu + rho * D.T @ (z - w))
-            Dq = D @ q
-            z = np.sign(Dq + w) * np.maximum(np.abs(Dq + w) - alpha/rho, 0)
-            w = w + Dq - z
+        elif method.lower() in ('chambolle_pock', 'cp', 'tv_cp'):
+            # Chambolle-Pock primal-dual
+            from .regularization import solve_tv_chambolle_pock
+            result = solve_tv_chambolle_pock(self.G, u, D, alpha=alpha, 
+                                             max_iter=max_iter, verbose=verbose)
+            q = result.q
+        
+        else:
+            raise ValueError(f"Unknown TV method: {method}. Use 'admm' or 'chambolle_pock'")
         
         return q - np.mean(q)
+    
+    def get_interior_positions(self) -> np.ndarray:
+        """Return source candidate grid positions."""
+        return self.interior_points.copy()
 
 
 class BEMNonlinearInverseSolver:
@@ -206,42 +288,99 @@ class BEMNonlinearInverseSolver:
     def _objective(self, params):
         sources = self._params_to_sources(params)
         for (x, y), _ in sources:
-            if x**2 + y**2 >= 0.9**2: return 1e10
+            if x**2 + y**2 >= 0.9**2: 
+                return 1e10
         u = self.forward.solve(sources)
         misfit = np.sum((u - self.u_measured)**2)
         self.history.append(misfit)
         return misfit
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200) -> InverseResult:
+    def _get_initial_guess(self, init_from: str, seed: int) -> list:
+        """Generate initial guess for optimization."""
+        n = self.n_sources
+        x0 = []
+        
+        if init_from == 'random' or seed > 0:
+            np.random.seed(42 + seed)
+            for i in range(n):
+                r = 0.3 + 0.4 * np.random.rand()
+                angle = 2 * np.pi * np.random.rand()
+                x0.extend([r * np.cos(angle), r * np.sin(angle)])
+                if i < n - 1:
+                    x0.append(np.random.randn())
+        else:
+            for i in range(n):
+                angle = 2 * np.pi * i / n
+                x0.extend([0.5 * np.cos(angle), 0.5 * np.sin(angle)])
+                if i < n - 1: 
+                    x0.append(1.0 if i % 2 == 0 else -1.0)
+        
+        return x0
+    
+    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200,
+              n_restarts: int = 1, init_from: str = 'circle') -> InverseResult:
+        """
+        Solve the nonlinear inverse problem.
+        
+        Parameters
+        ----------
+        method : str
+            'L-BFGS-B', 'differential_evolution', 'SLSQP', 'basinhopping'
+        maxiter : int
+            Maximum iterations
+        n_restarts : int
+            Number of random restarts for local optimizers
+        init_from : str
+            'circle' or 'random'
+        """
         self.history = []
         n = self.n_sources
         
         bounds = []
         for i in range(n):
             bounds.extend([(-0.85, 0.85), (-0.85, 0.85)])
-            if i < n - 1: bounds.append((-5.0, 5.0))
+            if i < n - 1: 
+                bounds.append((-5.0, 5.0))
         
-        x0 = []
-        for i in range(n):
-            angle = 2 * np.pi * i / n
-            x0.extend([0.5 * np.cos(angle), 0.5 * np.sin(angle)])
-            if i < n - 1: x0.append(1.0 if i % 2 == 0 else -1.0)
+        best_result = None
+        best_fun = np.inf
         
         if method == 'differential_evolution':
-            result = differential_evolution(self._objective, bounds, maxiter=maxiter, seed=42)
+            result = differential_evolution(self._objective, bounds, maxiter=maxiter, 
+                                           seed=42, polish=True, workers=1)
+            best_result = result
+        elif method == 'basinhopping':
+            from scipy.optimize import basinhopping
+            x0 = self._get_initial_guess(init_from, 0)
+            minimizer_kwargs = {'method': 'L-BFGS-B', 'bounds': bounds}
+            result = basinhopping(self._objective, x0, minimizer_kwargs=minimizer_kwargs,
+                                 niter=maxiter, seed=42)
+            best_result = result
         else:
-            result = minimize(self._objective, x0, method=method, bounds=bounds, options={'maxiter': maxiter})
+            for restart in range(n_restarts):
+                x0 = self._get_initial_guess(init_from, restart)
+                result = minimize(self._objective, x0, method=method, bounds=bounds, 
+                                options={'maxiter': maxiter})
+                if result.fun < best_fun:
+                    best_fun = result.fun
+                    best_result = result
         
-        sources = [Source(x, y, q) for (x, y), q in self._params_to_sources(result.x)]
-        return InverseResult(sources, np.sqrt(result.fun), result.success, 
-                            str(result.message) if hasattr(result, 'message') else '', 
-                            result.nit if hasattr(result, 'nit') else len(self.history), self.history)
+        sources = [Source(x, y, q) for (x, y), q in self._params_to_sources(best_result.x)]
+        return InverseResult(
+            sources, np.sqrt(best_result.fun), 
+            best_result.success if hasattr(best_result, 'success') else True,
+            str(best_result.message) if hasattr(best_result, 'message') else '', 
+            best_result.nit if hasattr(best_result, 'nit') else len(self.history), 
+            self.history
+        )
 
 
 def generate_synthetic_data(sources, n_boundary=100, noise_level=0.0, seed=None):
     """Generate synthetic boundary measurements."""
-    if seed: np.random.seed(seed)
+    if seed: 
+        np.random.seed(seed)
     forward = BEMForwardSolver(n_boundary)
     u = forward.solve(sources)
-    if noise_level > 0: u += np.random.normal(0, noise_level, len(u))
+    if noise_level > 0: 
+        u += np.random.normal(0, noise_level, len(u))
     return forward.theta, u

@@ -91,36 +91,30 @@ Examples:
     config_parser.add_argument('--list-templates', action='store_true',
                               help='List available templates')
     
-    # Info command
-    info_parser = subparsers.add_parser('info', help='Package information')
-    
     # Compare command
-    compare_parser = subparsers.add_parser('compare', help='Compare all solver methods')
-    compare_parser.add_argument('--quick', action='store_true',
-                               help='Quick mode (fewer solvers)')
+    compare_parser = subparsers.add_parser('compare', help='Compare all solvers')
+    compare_parser.add_argument('--quick', action='store_true', 
+                               help='Quick mode (fixed α, no sweep)')
+    compare_parser.add_argument('--optimal', action='store_true',
+                               help='Use optimal α for each method (via L-curve)')
+    compare_parser.add_argument('--methods', type=str, nargs='+',
+                               default=['l1', 'l2', 'tv_admm', 'tv_cp'],
+                               help='Regularization methods to compare')
     compare_parser.add_argument('--noise', type=float, default=0.001,
                                help='Noise level')
     compare_parser.add_argument('--alpha', type=float, default=1e-4,
-                               help='Regularization parameter for linear solvers')
+                               help='Regularization parameter (for quick mode)')
+    compare_parser.add_argument('--no-nonlinear', action='store_true',
+                               help='Skip nonlinear solvers')
     compare_parser.add_argument('--save', type=str, default=None,
-                               help='Save comparison figure to path')
+                               help='Save figure to path')
     compare_parser.add_argument('--no-plot', action='store_true',
                                help='Skip plotting')
     
+    # Info command
+    info_parser = subparsers.add_parser('info', help='Package information')
+    
     return parser
-
-
-def sources_to_tuples(sources):
-    """Convert Source objects to ((x, y), q) tuples."""
-    result = []
-    for s in sources:
-        if hasattr(s, 'x'):
-            # Source object
-            result.append(((s.x, s.y), s.intensity))
-        else:
-            # Already a tuple
-            result.append(s)
-    return result
 
 
 def run_demo(args):
@@ -154,10 +148,7 @@ def run_demo(args):
         print("\nNonlinear solver...")
         inverse = bem_solver.BEMNonlinearInverseSolver(n_sources=4, n_boundary=100)
         inverse.set_measured_data(u_measured)
-        result = inverse.solve(method='L-BFGS-B', maxiter=100)
-        
-        # Convert Source objects to tuples for compatibility
-        sources_rec = sources_to_tuples(result.sources)
+        sources_rec, _ = inverse.solve(method='L-BFGS-B', maxiter=100)
         
         # Compute recovered boundary data
         u_rec = forward.solve(sources_rec)
@@ -168,7 +159,7 @@ def run_demo(args):
         
         print("\nRecovered sources:")
         for i, ((x, y), q) in enumerate(sources_rec):
-            print(f"  {i+1}: ({x:+.3f}, {y:+.3f}), q = {q:+.3f}")
+            print(f"  {i+1}: ({x:+.3f}, {y:+.3f}), q = {q:+.2f}")
         
         # Plot
         theta = forward.theta
@@ -199,8 +190,7 @@ def run_demo(args):
         
         inverse = conformal_bem.ConformalNonlinearInverse(ellipse, n_sources=4, n_boundary=100)
         inverse.set_measured_data(u_measured)
-        result = inverse.solve(method='L-BFGS-B', maxiter=100)
-        sources_rec = sources_to_tuples(result.sources)
+        sources_rec, _ = inverse.solve(method='L-BFGS-B', maxiter=100)
         
         print("\nTrue sources:")
         for i, ((x, y), q) in enumerate(sources_true):
@@ -208,7 +198,7 @@ def run_demo(args):
         
         print("\nRecovered sources:")
         for i, ((x, y), q) in enumerate(sources_rec):
-            print(f"  {i+1}: ({x:+.3f}, {y:+.3f}), q = {q:+.3f}")
+            print(f"  {i+1}: ({x:+.3f}, {y:+.3f}), q = {q:+.2f}")
         
         # Plot
         fig, ax = plt.subplots(figsize=(10, 8))
@@ -400,24 +390,28 @@ Inverse Source Localization Toolkit
 
 Methods:
   - BEM (Boundary Element Method) with analytical Green's function
+  - FEM (Finite Element Method) with uniform triangular mesh
   - Conformal BEM for general simply connected domains
-  - FEM (Finite Element Method) fallback
 
-Regularization:
-  - L2 (Tikhonov) - smooth solutions
-  - L1 (Sparsity) - sparse solutions via IRLS
-  - TV (Total Variation) - piecewise constant via Chambolle-Pock or ADMM
+Forward Methods:
+  - BEM: Analytical Green's function (fast, exact on unit disk)
+  - FEM: Finite element discretization (mesh-based)
+
+Inverse Methods (Linear/Distributed):
+  - L2 (Tikhonov): Smooth solutions, closed-form
+  - L1 (Sparsity): Sparse solutions via IRLS
+  - TV-ADMM: Piecewise constant via ADMM
+  - TV-CP: Piecewise constant via Chambolle-Pock
+
+Inverse Methods (Nonlinear/Continuous):
+  - L-BFGS-B: Local optimizer (fast, may get stuck)
+  - differential_evolution: Global optimizer (slower, more robust)
+  - basinhopping: Global with local polish
 
 Domain Support:
   - Unit disk (analytical)
   - Ellipse (Joukowsky map)
   - Star-shaped domains (numerical conformal map)
-
-Solver Combinations:
-  - BEMLinearInverseSolver: Grid-based, analytical Green's function
-  - BEMNonlinearInverseSolver: Continuous positions, mesh-free
-  - FEMLinearInverseSolver: Grid-based, FEM forward
-  - FEMNonlinearInverseSolver: Continuous positions, FEM forward
 
 For more information:
   - Documentation: docs/main.pdf
@@ -427,8 +421,9 @@ For more information:
 
 
 def run_compare(args):
-    """Run comprehensive solver comparison."""
-    from .comparison import compare_all_solvers, print_comparison_table, plot_comparison
+    """Run solver comparison."""
+    from .comparison import (compare_all_solvers, compare_with_optimal_alpha, 
+                            print_comparison_table, plot_comparison)
     import matplotlib.pyplot as plt
     
     # Test sources
@@ -439,29 +434,53 @@ def run_compare(args):
         ((0.3, -0.5), -1.0),
     ]
     
-    print("="*60)
+    print("="*70)
     print("INVERSE SOURCE LOCALIZATION - SOLVER COMPARISON")
-    print("="*60)
+    print("="*70)
     print(f"\nTrue sources: {len(sources_true)}")
     print(f"Noise level: {args.noise}")
-    print(f"Alpha (linear): {args.alpha}")
     
-    # Run comparison
-    results = compare_all_solvers(
-        sources_true,
-        noise_level=args.noise,
-        alpha_linear=args.alpha,
-        quick=args.quick
-    )
+    if args.optimal:
+        # Use optimal alpha for each method
+        print(f"Methods: {args.methods}")
+        print("Mode: Optimal α selection via L-curve")
+        
+        results = compare_with_optimal_alpha(
+            sources_true,
+            noise_level=args.noise,
+            methods=args.methods,
+            include_nonlinear=not args.no_nonlinear,
+            verbose=True
+        )
+    elif args.quick:
+        # Quick mode with fixed alpha
+        print(f"Alpha (linear): {args.alpha}")
+        print("Mode: Quick (fixed α)")
+        
+        results = compare_all_solvers(
+            sources_true,
+            noise_level=args.noise,
+            alpha_linear=args.alpha,
+            quick=True
+        )
+    else:
+        # Default: full comparison with fixed alpha
+        print(f"Alpha (linear): {args.alpha}")
+        print("Mode: Full comparison (fixed α)")
+        
+        results = compare_all_solvers(
+            sources_true,
+            noise_level=args.noise,
+            alpha_linear=args.alpha,
+            quick=False
+        )
     
     # Print table
     print_comparison_table(results)
     
     # Plot
     if not args.no_plot:
-        from pathlib import Path
         save_path = args.save or 'results/comparison.png'
-        Path(save_path).parent.mkdir(exist_ok=True)
         fig = plot_comparison(results, sources_true, save_path=save_path)
         plt.show()
 
@@ -483,10 +502,10 @@ def main():
         run_sweep(args)
     elif args.command == 'config':
         run_config(args)
-    elif args.command == 'info':
-        run_info(args)
     elif args.command == 'compare':
         run_compare(args)
+    elif args.command == 'info':
+        run_info(args)
 
 
 if __name__ == '__main__':
