@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inverse-source"
 version = "0.1.0"
-description = "Inverse source localization from boundary measurements using FEniCSx"
+description = "Inverse source localization from boundary measurements using BEM and FEM"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Serdan", email = "your.email@example.com"}
 ]
-keywords = ["inverse problems", "PDE", "FEM", "source localization", "FEniCSx"]
+keywords = ["inverse problems", "PDE", "FEM", "BEM", "source localization"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -52,13 +52,16 @@ jupyter = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/inverse-source"
-Documentation = "https://github.com/yourusername/inverse-source#readme"
-Repository = "https://github.com/yourusername/inverse-source"
+Homepage = "https://github.com/Shaerdan/inverse_source_project"
+Documentation = "https://github.com/Shaerdan/inverse_source_project#readme"
+Repository = "https://github.com/Shaerdan/inverse_source_project"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
+[project.scripts]
+inverse-source = "inverse_source.cli:main"
+
+[tool.setuptools]
+packages = ["inverse_source"]
+package-dir = {"inverse_source" = "src"}
 
 [tool.black]
 line-length = 88
@@ -66,7 +69,7 @@ target-version = ['py310', 'py311', 'py312']
 include = '\.pyi?$'
 
 [tool.pylint.messages_control]
-disable = ["C0114", "C0115", "C0116"]  # Missing docstrings
+disable = ["C0114", "C0115", "C0116"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

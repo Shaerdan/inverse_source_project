@@ -19,7 +19,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from inverse_source_package import (
+from inverse_source import (
     bem_solver,
     conformal_bem,
     regularization,

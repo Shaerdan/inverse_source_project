@@ -44,7 +44,7 @@ pip install -e .
 ### Python API
 
 ```python
-from inverse_source_package import bem_solver
+from inverse_source import bem_solver
 
 # Define sources (position, intensity) - must sum to zero
 sources_true = [
@@ -76,16 +76,16 @@ q = linear.solve_l1(u_measured, alpha=1e-4)
 
 ```bash
 # Run demo
-python -m inverse_source_package.cli demo --type bem
+python -m inverse_source.cli demo --type bem
 
 # Solve with specific parameters
-python -m inverse_source_package.cli solve --method l1 --alpha 1e-4
+python -m inverse_source.cli solve --method l1 --alpha 1e-4
 
 # Parameter sweep
-python -m inverse_source_package.cli sweep --method all --plot
+python -m inverse_source.cli sweep --method all --plot
 
 # Show available templates
-python -m inverse_source_package.cli config --list-templates
+python -m inverse_source.cli config --list-templates
 ```
 
 ## Mathematical Background
@@ -116,7 +116,7 @@ See `docs/main.pdf` for complete mathematical derivation.
 ## Project Structure
 
 ```
-inverse_source_package/
+inverse_source/
 ├── src/
 │   ├── __init__.py         # Package initialization
 │   ├── bem_solver.py       # BEM solvers for unit disk
