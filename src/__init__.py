@@ -153,6 +153,16 @@ from .parameter_study import (
 )
 
 # =============================================================================
+# COMPARISON (all solver types)
+# =============================================================================
+from .comparison import (
+    compare_all_solvers,
+    print_comparison_table,
+    plot_comparison,
+    ComparisonResult,
+)
+
+# =============================================================================
 # MODULE IMPORTS (for inverse_source.bem_solver style access)
 # =============================================================================
 from . import bem_solver
@@ -162,6 +172,7 @@ from . import regularization
 from . import parameter_study
 from . import config
 from . import utils
+from . import comparison
 
 # =============================================================================
 # PUBLIC API
@@ -229,6 +240,12 @@ __all__ = [
     'compare_methods',
     'SweepResult',
     
+    # Comparison
+    'compare_all_solvers',
+    'print_comparison_table',
+    'plot_comparison',
+    'ComparisonResult',
+    
     # Modules
     'bem_solver',
     'conformal_bem',
@@ -237,4 +254,5 @@ __all__ = [
     'parameter_study',
     'config',
     'utils',
+    'comparison',
 ]

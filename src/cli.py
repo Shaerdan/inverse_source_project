@@ -94,6 +94,19 @@ Examples:
     # Info command
     info_parser = subparsers.add_parser('info', help='Package information')
     
+    # Compare command
+    compare_parser = subparsers.add_parser('compare', help='Compare all solver methods')
+    compare_parser.add_argument('--quick', action='store_true',
+                               help='Quick mode (fewer solvers)')
+    compare_parser.add_argument('--noise', type=float, default=0.001,
+                               help='Noise level')
+    compare_parser.add_argument('--alpha', type=float, default=1e-4,
+                               help='Regularization parameter for linear solvers')
+    compare_parser.add_argument('--save', type=str, default=None,
+                               help='Save comparison figure to path')
+    compare_parser.add_argument('--no-plot', action='store_true',
+                               help='Skip plotting')
+    
     return parser
 
 
@@ -400,11 +413,57 @@ Domain Support:
   - Ellipse (Joukowsky map)
   - Star-shaped domains (numerical conformal map)
 
+Solver Combinations:
+  - BEMLinearInverseSolver: Grid-based, analytical Green's function
+  - BEMNonlinearInverseSolver: Continuous positions, mesh-free
+  - FEMLinearInverseSolver: Grid-based, FEM forward
+  - FEMNonlinearInverseSolver: Continuous positions, FEM forward
+
 For more information:
   - Documentation: docs/main.pdf
   - Examples: examples/complete_example.py
   - GitHub: https://github.com/Shaerdan/inverse_source_project
     """)
+
+
+def run_compare(args):
+    """Run comprehensive solver comparison."""
+    from .comparison import compare_all_solvers, print_comparison_table, plot_comparison
+    import matplotlib.pyplot as plt
+    
+    # Test sources
+    sources_true = [
+        ((-0.3, 0.4), 1.0),
+        ((0.5, 0.3), 1.0),
+        ((-0.4, -0.4), -1.0),
+        ((0.3, -0.5), -1.0),
+    ]
+    
+    print("="*60)
+    print("INVERSE SOURCE LOCALIZATION - SOLVER COMPARISON")
+    print("="*60)
+    print(f"\nTrue sources: {len(sources_true)}")
+    print(f"Noise level: {args.noise}")
+    print(f"Alpha (linear): {args.alpha}")
+    
+    # Run comparison
+    results = compare_all_solvers(
+        sources_true,
+        noise_level=args.noise,
+        alpha_linear=args.alpha,
+        quick=args.quick
+    )
+    
+    # Print table
+    print_comparison_table(results)
+    
+    # Plot
+    if not args.no_plot:
+        from pathlib import Path
+        save_path = args.save or 'results/comparison.png'
+        Path(save_path).parent.mkdir(exist_ok=True)
+        fig = plot_comparison(results, sources_true, save_path=save_path)
+        plt.show()
 
 
 def main():
@@ -426,6 +485,8 @@ def main():
         run_config(args)
     elif args.command == 'info':
         run_info(args)
+    elif args.command == 'compare':
+        run_compare(args)
 
 
 if __name__ == '__main__':
