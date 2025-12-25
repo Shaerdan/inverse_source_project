@@ -2,41 +2,54 @@
 Inverse Source Localization Package
 ====================================
 
-A comprehensive toolkit for inverse source localization in 2D domains
-using Boundary Element Methods (BEM) and Finite Element Methods (FEM).
+A comprehensive toolkit for inverse source localization in 2D domains.
 
-Formulations
+Solver Types
 ------------
-1. **Linear (Distributional)**: Sources fixed to grid, solve for intensities
-   - BEMLinearInverseSolver
-   - FEMLinearInverseSolver
+1. **Analytical Solver** (Unit Disk Only)
+   - Uses exact closed-form Neumann Green's function
+   - Fastest for point sources on unit disk
+   - No discretization error in forward problem
    
+2. **BEM Solver** (Boundary Element Method)
+   - Numerical integration for boundary integrals
+   - Handles distributed sources
+   - Validates analytical solver
+
+3. **FEM Solver** (Finite Element Method)
+   - Mesh-based discretization
+   - Works for any domain geometry
+   - Handles general source distributions
+
+4. **Conformal Solver** (General Domains)
+   - Maps general domains to unit disk
+   - Uses analytical solution after mapping
+   - Supports ellipse, star-shaped domains
+
+Problem Formulations
+--------------------
+1. **Linear (Distributional)**: Sources on fixed grid, solve for intensities
 2. **Nonlinear (Continuous)**: Optimize source positions and intensities
-   - BEMNonlinearInverseSolver  
-   - FEMNonlinearInverseSolver
 
 Quick Start
 -----------
->>> from inverse_source import bem_solver
+>>> from inverse_source import AnalyticalForwardSolver, AnalyticalLinearInverseSolver
+>>> import numpy as np
 >>> 
->>> # Create sources
+>>> # Define sources (must sum to zero for Neumann BC)
 >>> sources = [
 ...     ((-0.3, 0.4), 1.0),
 ...     ((0.5, -0.3), -1.0),
 ... ]
 >>> 
 >>> # Forward solve
->>> forward = bem_solver.BEMForwardSolver(n_boundary_points=100)
+>>> forward = AnalyticalForwardSolver(n_boundary_points=100)
 >>> u_boundary = forward.solve(sources)
 >>> 
->>> # Inverse solve (nonlinear - continuous positions)
->>> inverse = bem_solver.BEMNonlinearInverseSolver(n_sources=2, n_boundary=100)
->>> inverse.set_measured_data(u_boundary)
->>> result = inverse.solve()
->>> 
->>> # Or linear inverse (grid-based)
->>> linear = bem_solver.BEMLinearInverseSolver(n_boundary=100)
->>> q = linear.solve_l1(u_boundary, alpha=1e-4)
+>>> # Linear inverse with L1 regularization
+>>> inverse = AnalyticalLinearInverseSolver(n_boundary=100)
+>>> inverse.build_greens_matrix()
+>>> q_recovered = inverse.solve_l1(u_boundary, alpha=1e-4)
 
 Authors
 -------
@@ -47,28 +60,48 @@ License
 MIT License
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Serdan"
 
 # =============================================================================
-# BEM SOLVERS (Analytical Green's function - mesh-free)
+# ANALYTICAL SOLVER (Exact solution for unit disk - formerly mislabeled as "BEM")
 # =============================================================================
-from .bem_solver import (
+from .analytical_solver import (
     # Forward
-    BEMForwardSolver,
+    AnalyticalForwardSolver,
     # Inverse - Linear (grid-based)
-    BEMLinearInverseSolver,
+    AnalyticalLinearInverseSolver,
     # Inverse - Nonlinear (continuous positions)
-    BEMNonlinearInverseSolver,
-    # Utilities
+    AnalyticalNonlinearInverseSolver,
+    # Green's function
     greens_function_disk_neumann,
+    greens_function_disk_neumann_gradient,
+    # Utilities
     generate_synthetic_data,
     Source,
     InverseResult,
+    # Backward-compatible aliases (deprecated)
+    BEMForwardSolver,  # -> AnalyticalForwardSolver
+    BEMLinearInverseSolver,  # -> AnalyticalLinearInverseSolver
+    BEMNonlinearInverseSolver,  # -> AnalyticalNonlinearInverseSolver
 )
 
 # =============================================================================
-# MESH GENERATION (shared by FEM and BEM linear)
+# TRUE BEM SOLVER (Numerical boundary integration)
+# =============================================================================
+from .bem_solver import (
+    BEMForwardSolver as BEMNumericalForwardSolver,
+    BEMLinearInverseSolver as BEMNumericalLinearInverseSolver,
+    BEMDiscretization,
+    BEMResult,
+    fundamental_solution_2d,
+    fundamental_solution_gradient_2d,
+    validate_against_analytical,
+    compare_bem_analytical,
+)
+
+# =============================================================================
+# MESH GENERATION (shared by FEM and linear solvers)
 # =============================================================================
 from .mesh import (
     create_disk_mesh,
@@ -76,7 +109,7 @@ from .mesh import (
 )
 
 # =============================================================================
-# FEM SOLVERS (Finite Element - mesh-based)
+# FEM SOLVER (Finite Element Method)
 # =============================================================================
 from .fem_solver import (
     # Forward
@@ -91,16 +124,25 @@ from .fem_solver import (
 )
 
 # =============================================================================
-# CONFORMAL BEM (General domains via conformal mapping)
+# CONFORMAL MAPPING SOLVER (General domains)
 # =============================================================================
-from .conformal_bem import (
-    ConformalBEMSolver,
-    ConformalNonlinearInverse,
-    ConformalLinearInverse,
+from .conformal_solver import (
+    # Maps
     ConformalMap,
     DiskMap,
     EllipseMap,
     StarShapedMap,
+    # Solvers
+    ConformalForwardSolver,
+    ConformalLinearInverseSolver,
+    ConformalNonlinearInverseSolver,
+    # Convenience
+    create_ellipse_solver,
+    create_star_solver,
+    # Backward-compatible aliases
+    ConformalBEMSolver,  # -> ConformalForwardSolver
+    ConformalNonlinearInverse,  # -> ConformalNonlinearInverseSolver
+    ConformalLinearInverse,  # -> ConformalLinearInverseSolver
 )
 
 # =============================================================================
@@ -169,11 +211,12 @@ from .comparison import (
 )
 
 # =============================================================================
-# MODULE IMPORTS (for inverse_source.bem_solver style access)
+# MODULE IMPORTS (for inverse_source.module style access)
 # =============================================================================
 from . import mesh
+from . import analytical_solver
 from . import bem_solver
-from . import conformal_bem
+from . import conformal_solver
 from . import fem_solver
 from . import regularization
 from . import parameter_study
@@ -189,38 +232,50 @@ __all__ = [
     '__version__',
     '__author__',
     
-    # BEM
-    'BEMForwardSolver',
-    'BEMLinearInverseSolver', 
-    'BEMNonlinearInverseSolver',
+    # === ANALYTICAL SOLVER (recommended for unit disk) ===
+    'AnalyticalForwardSolver',
+    'AnalyticalLinearInverseSolver', 
+    'AnalyticalNonlinearInverseSolver',
     'greens_function_disk_neumann',
+    'greens_function_disk_neumann_gradient',
     'generate_synthetic_data',
     
-    # Mesh
+    # === TRUE BEM SOLVER ===
+    'BEMNumericalForwardSolver',
+    'BEMNumericalLinearInverseSolver',
+    'BEMDiscretization',
+    'BEMResult',
+    'fundamental_solution_2d',
+    'validate_against_analytical',
+    'compare_bem_analytical',
+    
+    # === MESH ===
     'create_disk_mesh',
     'get_source_grid',
     
-    # FEM
+    # === FEM SOLVER ===
     'FEMForwardSolver',
     'FEMLinearInverseSolver',
     'FEMNonlinearInverseSolver',
     'solve_poisson',
     'generate_synthetic_data_fem',
     
-    # Conformal
-    'ConformalBEMSolver',
-    'ConformalNonlinearInverse',
-    'ConformalLinearInverse',
+    # === CONFORMAL SOLVER ===
     'ConformalMap',
     'DiskMap',
-    'EllipseMap',
+    'EllipseMap', 
     'StarShapedMap',
+    'ConformalForwardSolver',
+    'ConformalLinearInverseSolver',
+    'ConformalNonlinearInverseSolver',
+    'create_ellipse_solver',
+    'create_star_solver',
     
-    # Data classes
+    # === DATA CLASSES ===
     'Source',
     'InverseResult',
     
-    # Regularization
+    # === REGULARIZATION ===
     'solve_l1',
     'solve_l2',
     'solve_tv_chambolle_pock',
@@ -229,13 +284,13 @@ __all__ = [
     'build_gradient_operator',
     'RegularizationResult',
     
-    # Config
+    # === CONFIG ===
     'Config',
     'get_config',
     'get_template',
     'TEMPLATES',
     
-    # Utils
+    # === UTILS ===
     'plot_sources',
     'plot_boundary_data',
     'plot_recovery_comparison',
@@ -244,26 +299,35 @@ __all__ = [
     'plot_l_curve',
     'create_test_sources',
     
-    # Parameter study
+    # === PARAMETER STUDY ===
     'parameter_sweep',
     'find_l_curve_corner',
     'compare_methods',
     'SweepResult',
     
-    # Comparison
+    # === COMPARISON ===
     'compare_all_solvers',
     'print_comparison_table',
     'plot_comparison',
     'ComparisonResult',
     
-    # Modules
+    # === MODULES ===
     'mesh',
+    'analytical_solver',
     'bem_solver',
-    'conformal_bem',
+    'conformal_solver',
     'fem_solver',
     'regularization',
     'parameter_study',
     'config',
     'utils',
     'comparison',
+    
+    # === BACKWARD-COMPATIBLE ALIASES (deprecated) ===
+    'BEMForwardSolver',  # Use AnalyticalForwardSolver
+    'BEMLinearInverseSolver',  # Use AnalyticalLinearInverseSolver
+    'BEMNonlinearInverseSolver',  # Use AnalyticalNonlinearInverseSolver
+    'ConformalBEMSolver',  # Use ConformalForwardSolver
+    'ConformalNonlinearInverse',  # Use ConformalNonlinearInverseSolver
+    'ConformalLinearInverse',  # Use ConformalLinearInverseSolver
 ]

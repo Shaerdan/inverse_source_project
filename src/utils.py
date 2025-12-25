@@ -1,37 +1,127 @@
 """
-Utilities for Inverse Source Localization
-==========================================
+Utility Functions for Inverse Source Localization
+==================================================
 
-Plotting, analysis, and helper functions.
+Plotting, error computation, and analysis utilities.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 from typing import List, Tuple, Optional
-from dataclasses import dataclass
 
 
-def plot_sources(sources_true: List[Tuple[Tuple[float, float], float]],
-                 sources_recovered: Optional[List] = None,
-                 ax: Optional[plt.Axes] = None,
-                 title: str = "Source Locations",
-                 domain_radius: float = 1.0) -> plt.Axes:
+def plot_sources(sources: List[Tuple[Tuple[float, float], float]], 
+                 ax: plt.Axes = None, 
+                 title: str = "Point Sources",
+                 show_boundary: bool = True,
+                 domain: str = 'disk') -> plt.Axes:
     """
-    Plot source locations on the domain.
+    Plot point sources on the domain.
     
     Parameters
     ----------
-    sources_true : list of ((x, y), q) tuples
-        True source locations and intensities
-    sources_recovered : list, optional
-        Recovered sources (Source objects or tuples)
+    sources : list of ((x, y), intensity)
+        Point sources
     ax : matplotlib.axes.Axes, optional
-        Axes to plot on. If None, creates new figure.
+        Axes to plot on
     title : str
         Plot title
-    domain_radius : float
-        Radius of the domain circle to draw
+    show_boundary : bool
+        Draw domain boundary
+    domain : str
+        'disk' or 'custom'
+        
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 6))
+    
+    # Draw boundary
+    if show_boundary:
+        theta = np.linspace(0, 2*np.pi, 100)
+        ax.plot(np.cos(theta), np.sin(theta), 'k-', linewidth=1)
+    
+    # Plot sources
+    for (x, y), q in sources:
+        color = 'red' if q > 0 else 'blue'
+        size = 100 * np.abs(q)
+        ax.scatter(x, y, c=color, s=size, alpha=0.7, edgecolors='black')
+        ax.annotate(f'{q:.2f}', (x, y), textcoords="offset points", 
+                   xytext=(5, 5), fontsize=8)
+    
+    ax.set_xlim(-1.2, 1.2)
+    ax.set_ylim(-1.2, 1.2)
+    ax.set_aspect('equal')
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    
+    return ax
+
+
+def plot_boundary_data(theta: np.ndarray, u: np.ndarray,
+                       ax: plt.Axes = None,
+                       title: str = "Boundary Data",
+                       label: str = None) -> plt.Axes:
+    """
+    Plot boundary measurements as a function of angle.
+    
+    Parameters
+    ----------
+    theta : array
+        Boundary angles
+    u : array
+        Solution values on boundary
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on
+    title : str
+        Plot title
+    label : str, optional
+        Legend label
+        
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+    
+    ax.plot(theta, u, '-', label=label)
+    ax.set_xlabel('θ (radians)')
+    ax.set_ylabel('u(θ)')
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    
+    if label:
+        ax.legend()
+    
+    return ax
+
+
+def plot_recovery_comparison(true_sources: List[Tuple[Tuple[float, float], float]],
+                             positions: np.ndarray,
+                             q_recovered: np.ndarray,
+                             threshold: float = None,
+                             ax: plt.Axes = None,
+                             title: str = "Source Recovery") -> plt.Axes:
+    """
+    Compare true sources with recovered source distribution.
+    
+    Parameters
+    ----------
+    true_sources : list
+        True point sources
+    positions : array, shape (n, 2)
+        Candidate positions
+    q_recovered : array, shape (n,)
+        Recovered intensities
+    threshold : float, optional
+        Threshold for significant sources (auto if None)
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on
+    title : str
+        Plot title
         
     Returns
     -------
@@ -40,331 +130,247 @@ def plot_sources(sources_true: List[Tuple[Tuple[float, float], float]],
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 8))
     
-    # Draw domain boundary
+    if threshold is None:
+        threshold = 0.1 * np.abs(q_recovered).max()
+    
+    # Draw boundary
     theta = np.linspace(0, 2*np.pi, 100)
-    ax.plot(domain_radius * np.cos(theta), domain_radius * np.sin(theta), 
-            'k-', linewidth=2, label='Domain')
+    ax.plot(np.cos(theta), np.sin(theta), 'k-', linewidth=1)
     
-    # Plot true sources
-    for i, ((x, y), q) in enumerate(sources_true):
-        color = 'red' if q > 0 else 'blue'
-        marker = 'o'
-        ax.plot(x, y, marker, color=color, markersize=15, 
-                markerfacecolor='none', markeredgewidth=2,
-                label=f'True: q={q:+.2f}' if i < 4 else None)
+    # Plot recovered distribution
+    significant = np.abs(q_recovered) > threshold
     
-    # Plot recovered sources if provided
-    if sources_recovered is not None:
-        for i, s in enumerate(sources_recovered):
-            # Handle both Source objects and tuples
-            if hasattr(s, 'x'):
-                x, y, q = s.x, s.y, s.intensity
-            else:
-                (x, y), q = s
-            
-            color = 'red' if q > 0 else 'blue'
-            ax.plot(x, y, '+', color=color, markersize=15, markeredgewidth=3,
-                    label=f'Rec: q={q:+.2f}' if i < 4 else None)
+    # Background: all candidates (faint)
+    ax.scatter(positions[:, 0], positions[:, 1], c='gray', s=5, alpha=0.2)
     
+    # Significant recovered sources
+    for i in np.where(significant)[0]:
+        color = 'red' if q_recovered[i] > 0 else 'blue'
+        size = 50 * np.abs(q_recovered[i]) / np.abs(q_recovered).max()
+        ax.scatter(positions[i, 0], positions[i, 1], c=color, s=size, 
+                  alpha=0.6, marker='o')
+    
+    # True sources (stars)
+    for (x, y), q in true_sources:
+        color = 'darkred' if q > 0 else 'darkblue'
+        ax.scatter(x, y, c=color, s=200, marker='*', edgecolors='black', linewidths=1)
+    
+    ax.set_xlim(-1.2, 1.2)
+    ax.set_ylim(-1.2, 1.2)
     ax.set_aspect('equal')
-    ax.set_xlim(-domain_radius * 1.2, domain_radius * 1.2)
-    ax.set_ylim(-domain_radius * 1.2, domain_radius * 1.2)
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
     ax.set_title(title)
-    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
+    
+    # Legend
+    ax.scatter([], [], c='darkred', s=100, marker='*', label='True (+)')
+    ax.scatter([], [], c='darkblue', s=100, marker='*', label='True (-)')
+    ax.scatter([], [], c='red', s=50, marker='o', alpha=0.6, label='Recovered (+)')
+    ax.scatter([], [], c='blue', s=50, marker='o', alpha=0.6, label='Recovered (-)')
+    ax.legend(loc='upper right')
     
     return ax
 
 
-def plot_boundary_data(theta: np.ndarray, 
-                       u_measured: np.ndarray,
-                       u_recovered: Optional[np.ndarray] = None,
-                       ax: Optional[plt.Axes] = None,
-                       title: str = "Boundary Data") -> plt.Axes:
+def compute_source_error(true_sources: List[Tuple[Tuple[float, float], float]],
+                         positions: np.ndarray,
+                         q_recovered: np.ndarray,
+                         threshold: float = None) -> dict:
     """
-    Plot boundary measurements and fit.
+    Compute error metrics for source recovery.
     
     Parameters
     ----------
-    theta : array
-        Angular positions
-    u_measured : array
-        Measured boundary values
-    u_recovered : array, optional
-        Recovered/fitted boundary values
-    ax : matplotlib.axes.Axes, optional
-    title : str
+    true_sources : list
+        True point sources
+    positions : array
+        Candidate positions
+    q_recovered : array
+        Recovered intensities
+    threshold : float, optional
+        Threshold for significant sources
         
-    Returns
-    -------
-    ax : matplotlib.axes.Axes
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 4))
-    
-    ax.plot(theta, u_measured, 'b-', linewidth=2, label='Measured')
-    
-    if u_recovered is not None:
-        ax.plot(theta, u_recovered, 'r--', linewidth=2, label='Recovered')
-        residual = np.linalg.norm(u_measured - u_recovered)
-        ax.set_title(f'{title} (residual = {residual:.4e})')
-    else:
-        ax.set_title(title)
-    
-    ax.set_xlabel('θ')
-    ax.set_ylabel('u')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    return ax
-
-
-def plot_recovery_comparison(sources_true, sources_recovered, 
-                             theta, u_measured, u_recovered,
-                             figsize: Tuple[float, float] = (14, 5)):
-    """
-    Create a combined plot showing source locations and boundary fit.
-    
-    Parameters
-    ----------
-    sources_true : list of ((x, y), q) tuples
-    sources_recovered : list of Source objects or tuples
-    theta : array
-        Boundary angles
-    u_measured : array
-        Measured boundary values
-    u_recovered : array
-        Recovered boundary values
-    figsize : tuple
-        Figure size
-        
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    """
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-    
-    plot_sources(sources_true, sources_recovered, ax=axes[0], 
-                title='Source Locations: True (○) vs Recovered (+)')
-    plot_boundary_data(theta, u_measured, u_recovered, ax=axes[1],
-                      title='Boundary Fit')
-    
-    plt.tight_layout()
-    return fig
-
-
-def compute_source_error(sources_true: List[Tuple[Tuple[float, float], float]],
-                         sources_recovered: List) -> dict:
-    """
-    Compute error metrics between true and recovered sources.
-    
-    Uses Hungarian algorithm to match sources optimally.
-    
-    Parameters
-    ----------
-    sources_true : list of ((x, y), q) tuples
-    sources_recovered : list of Source objects or tuples
-    
     Returns
     -------
     metrics : dict
-        'position_rmse': RMS position error
-        'intensity_rmse': RMS intensity error
-        'position_max': Maximum position error
-        'intensity_max': Maximum intensity error
+        Error metrics including:
+        - n_true: number of true sources
+        - n_recovered: number of significant recovered sources
+        - position_errors: distances to nearest true source
+        - intensity_errors: intensity differences
+        - total_intensity_error: |Σq_true - Σq_recovered|
     """
-    from scipy.optimize import linear_sum_assignment
+    if threshold is None:
+        threshold = 0.1 * np.abs(q_recovered).max()
     
-    n_true = len(sources_true)
-    n_rec = len(sources_recovered)
-    n = max(n_true, n_rec)
+    significant = np.where(np.abs(q_recovered) > threshold)[0]
     
-    # Build cost matrix (position distances)
-    cost = np.full((n, n), 1e10)
+    # Extract true source info
+    true_pos = np.array([s[0] for s in true_sources])
+    true_q = np.array([s[1] for s in true_sources])
     
-    for i, ((x_t, y_t), q_t) in enumerate(sources_true):
-        for j, s in enumerate(sources_recovered):
-            if hasattr(s, 'x'):
-                x_r, y_r = s.x, s.y
-            else:
-                (x_r, y_r), _ = s
-            cost[i, j] = np.sqrt((x_t - x_r)**2 + (y_t - y_r)**2)
+    # For each recovered source, find nearest true source
+    position_errors = []
+    intensity_errors = []
     
-    # Optimal assignment
-    row_ind, col_ind = linear_sum_assignment(cost)
-    
-    # Compute errors for matched pairs
-    pos_errors = []
-    int_errors = []
-    
-    for i, j in zip(row_ind, col_ind):
-        if i < n_true and j < n_rec:
-            (x_t, y_t), q_t = sources_true[i]
-            s = sources_recovered[j]
-            if hasattr(s, 'x'):
-                x_r, y_r, q_r = s.x, s.y, s.intensity
-            else:
-                (x_r, y_r), q_r = s
-            
-            pos_errors.append(np.sqrt((x_t - x_r)**2 + (y_t - y_r)**2))
-            int_errors.append(abs(q_t - q_r))
+    for i in significant:
+        pos = positions[i]
+        q = q_recovered[i]
+        
+        # Distance to each true source
+        dists = np.sqrt(np.sum((true_pos - pos)**2, axis=1))
+        nearest = np.argmin(dists)
+        
+        position_errors.append(dists[nearest])
+        intensity_errors.append(np.abs(q - true_q[nearest]))
     
     return {
-        'position_rmse': np.sqrt(np.mean(np.array(pos_errors)**2)) if pos_errors else np.inf,
-        'intensity_rmse': np.sqrt(np.mean(np.array(int_errors)**2)) if int_errors else np.inf,
-        'position_max': np.max(pos_errors) if pos_errors else np.inf,
-        'intensity_max': np.max(int_errors) if int_errors else np.inf,
-        'n_matched': len(pos_errors),
+        'n_true': len(true_sources),
+        'n_recovered': len(significant),
+        'position_errors': np.array(position_errors),
+        'intensity_errors': np.array(intensity_errors),
+        'mean_position_error': np.mean(position_errors) if position_errors else np.inf,
+        'mean_intensity_error': np.mean(intensity_errors) if intensity_errors else np.inf,
+        'total_intensity_error': np.abs(true_q.sum() - q_recovered.sum()),
     }
 
 
-def l_curve_analysis(solver, u_measured: np.ndarray, 
-                     alphas: Optional[np.ndarray] = None,
-                     method: str = 'l1') -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+def l_curve_analysis(G: np.ndarray, u: np.ndarray,
+                     alpha_range: np.ndarray = None,
+                     method: str = 'l1',
+                     **kwargs) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Perform L-curve analysis to select optimal regularization parameter.
+    Compute L-curve for regularization parameter selection.
+    
+    The L-curve plots ||Gq - u|| vs ||q|| (or regularization term)
+    for varying α. The optimal α is at the "corner" of the L.
     
     Parameters
     ----------
-    solver : BEMLinearInverseSolver or similar
-        Linear inverse solver with solve_l1/solve_l2 methods
-    u_measured : array
-        Measured boundary data
-    alphas : array, optional
-        Regularization parameters to test. If None, uses logspace.
+    G : array
+        Forward operator
+    u : array
+        Measurements
+    alpha_range : array, optional
+        Regularization parameters to try
     method : str
         'l1' or 'l2'
+    **kwargs
+        Passed to solver
         
     Returns
     -------
     alphas : array
-        Tested alpha values
+        Regularization parameters
     residuals : array
-        ||Gq - u|| for each alpha
-    reg_norms : array
-        ||q|| or ||q||_1 for each alpha
-    alpha_opt : float
-        Optimal alpha (corner of L-curve)
+        ||Gq - u||
+    regularization : array
+        ||q|| or ||q||₁
     """
-    if alphas is None:
-        alphas = np.logspace(-6, -1, 30)
+    if alpha_range is None:
+        alpha_range = np.logspace(-6, 0, 20)
+    
+    try:
+        from .regularization import solve_l1, solve_l2
+    except ImportError:
+        from regularization import solve_l1, solve_l2
     
     residuals = []
-    reg_norms = []
+    regularization = []
     
-    for alpha in alphas:
+    for alpha in alpha_range:
         if method == 'l1':
-            q = solver.solve_l1(u_measured, alpha=alpha)
-            reg_norm = np.sum(np.abs(q))
+            q = solve_l1(G, u, alpha, **kwargs)
+            reg = np.sum(np.abs(q))
         else:
-            q = solver.solve_l2(u_measured, alpha=alpha)
-            reg_norm = np.linalg.norm(q)
+            q = solve_l2(G, u, alpha)
+            reg = np.linalg.norm(q)
         
-        residual = solver.compute_residual(q, u_measured) if hasattr(solver, 'compute_residual') else np.linalg.norm(solver.G @ q - (u_measured - np.mean(u_measured)))
-        
-        residuals.append(residual)
-        reg_norms.append(reg_norm)
+        residuals.append(np.linalg.norm(G @ q - u))
+        regularization.append(reg)
     
-    residuals = np.array(residuals)
-    reg_norms = np.array(reg_norms)
-    
-    # Find corner using curvature
-    log_res = np.log(residuals + 1e-14)
-    log_reg = np.log(reg_norms + 1e-14)
-    
-    # Compute curvature (simplified)
-    dx = np.gradient(log_res)
-    dy = np.gradient(log_reg)
-    ddx = np.gradient(dx)
-    ddy = np.gradient(dy)
-    
-    curvature = np.abs(dx * ddy - dy * ddx) / (dx**2 + dy**2 + 1e-14)**1.5
-    
-    # Find maximum curvature (exclude endpoints)
-    corner_idx = np.argmax(curvature[2:-2]) + 2
-    alpha_opt = alphas[corner_idx]
-    
-    return alphas, residuals, reg_norms, alpha_opt
+    return alpha_range, np.array(residuals), np.array(regularization)
 
 
-def plot_l_curve(alphas: np.ndarray, residuals: np.ndarray, 
-                 reg_norms: np.ndarray, alpha_opt: float,
-                 ax: Optional[plt.Axes] = None) -> plt.Axes:
+def plot_l_curve(residuals: np.ndarray, regularization: np.ndarray,
+                 alphas: np.ndarray = None,
+                 ax: plt.Axes = None,
+                 title: str = "L-Curve") -> plt.Axes:
     """
-    Plot L-curve with optimal alpha marked.
+    Plot L-curve and optionally mark the corner.
     
     Parameters
     ----------
-    alphas : array
     residuals : array
-    reg_norms : array
-    alpha_opt : float
+        ||Gq - u||
+    regularization : array
+        Regularization term
+    alphas : array, optional
+        Regularization parameters (for annotation)
     ax : matplotlib.axes.Axes, optional
-    
+        Axes to plot on
+    title : str
+        Plot title
+        
     Returns
     -------
     ax : matplotlib.axes.Axes
     """
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(6, 6))
     
-    ax.loglog(residuals, reg_norms, 'b.-', markersize=8)
+    ax.loglog(residuals, regularization, 'b.-', markersize=8)
     
-    # Mark optimal point
-    opt_idx = np.argmin(np.abs(alphas - alpha_opt))
-    ax.loglog(residuals[opt_idx], reg_norms[opt_idx], 'ro', markersize=12,
-              label=f'α* = {alpha_opt:.2e}')
+    if alphas is not None:
+        # Annotate some points
+        for i in [0, len(alphas)//4, len(alphas)//2, 3*len(alphas)//4, -1]:
+            ax.annotate(f'α={alphas[i]:.1e}', 
+                       (residuals[i], regularization[i]),
+                       textcoords="offset points", xytext=(5, 5), fontsize=7)
     
     ax.set_xlabel('Residual ||Gq - u||')
-    ax.set_ylabel('Regularization norm')
-    ax.set_title('L-Curve')
-    ax.legend()
-    ax.grid(True, alpha=0.3, which='both')
+    ax.set_ylabel('Regularization ||q||')
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
     
     return ax
 
 
-def create_test_sources(n_sources: int = 4, 
-                        radius_range: Tuple[float, float] = (0.3, 0.7),
-                        seed: Optional[int] = None) -> List[Tuple[Tuple[float, float], float]]:
+def create_test_sources(n_sources: int = 4, seed: int = 42,
+                        radius_range: Tuple[float, float] = (0.2, 0.7)) -> List[Tuple[Tuple[float, float], float]]:
     """
-    Create random test sources satisfying compatibility Σqₖ = 0.
+    Create random test sources satisfying compatibility condition.
     
     Parameters
     ----------
     n_sources : int
-        Number of sources (must be even for automatic compatibility)
-    radius_range : tuple
-        (min, max) radius for source positions
-    seed : int, optional
+        Number of sources
+    seed : int
         Random seed
+    radius_range : tuple
+        (min_radius, max_radius) for source positions
         
     Returns
     -------
-    sources : list of ((x, y), q) tuples
+    sources : list of ((x, y), intensity)
+        Test sources with Σq = 0
     """
-    if seed is not None:
-        np.random.seed(seed)
+    np.random.seed(seed)
     
     sources = []
-    r_min, r_max = radius_range
+    total_q = 0
     
-    for i in range(n_sources):
-        angle = 2 * np.pi * i / n_sources + np.random.uniform(-0.2, 0.2)
-        r = np.random.uniform(r_min, r_max)
-        x, y = r * np.cos(angle), r * np.sin(angle)
-        
-        # Alternate signs for compatibility
-        q = 1.0 if i % 2 == 0 else -1.0
-        q *= np.random.uniform(0.8, 1.2)  # Add some variation
-        
+    for i in range(n_sources - 1):
+        r = radius_range[0] + (radius_range[1] - radius_range[0]) * np.random.rand()
+        theta = 2 * np.pi * np.random.rand()
+        x, y = r * np.cos(theta), r * np.sin(theta)
+        q = np.random.randn()
         sources.append(((x, y), q))
+        total_q += q
     
-    # Adjust last source for exact compatibility
-    total = sum(q for _, q in sources[:-1])
-    (x, y), _ = sources[-1]
-    sources[-1] = ((x, y), -total)
+    # Last source ensures Σq = 0
+    r = radius_range[0] + (radius_range[1] - radius_range[0]) * np.random.rand()
+    theta = 2 * np.pi * np.random.rand()
+    x, y = r * np.cos(theta), r * np.sin(theta)
+    sources.append(((x, y), -total_q))
     
     return sources
