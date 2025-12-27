@@ -1302,7 +1302,8 @@ def print_comparison_table(results: List[ComparisonResult]):
 
 
 def plot_comparison(results: List[ComparisonResult], sources_true, save_path=None,
-                    show_peaks=True, show_clusters=False):
+                    show_peaks=True, show_clusters=False,
+                    domain_type='disk', domain_params=None):
     """
     Create comparison visualization with intensity information.
     
@@ -1315,6 +1316,10 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
         Show detected peaks (triangles) - better for smooth fields
     show_clusters : bool
         Show DBSCAN clusters (diamonds) - better for sparse fields
+    domain_type : str
+        'disk', 'ellipse', 'star', 'square', 'polygon'
+    domain_params : dict
+        Domain parameters (e.g., {'vertices': [...]} for polygon)
     """
     n_results = len(results)
     n_cols = min(4, n_results)
@@ -1326,10 +1331,26 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
     elif n_rows == 1:
         axes = axes.reshape(1, -1)
     
-    # Domain boundary
-    theta = np.linspace(0, 2*np.pi, 100)
-    boundary_x = np.cos(theta)
-    boundary_y = np.sin(theta)
+    # Domain boundary based on domain_type
+    if domain_type in ['square', 'polygon']:
+        if domain_type == 'square':
+            vertices = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        else:
+            vertices = domain_params.get('vertices') if domain_params else [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]
+        vertices_arr = np.array(vertices + [vertices[0]])  # Close the polygon
+        boundary_x = vertices_arr[:, 0]
+        boundary_y = vertices_arr[:, 1]
+    elif domain_type == 'ellipse':
+        a = domain_params.get('a', 2.0) if domain_params else 2.0
+        b = domain_params.get('b', 1.0) if domain_params else 1.0
+        theta = np.linspace(0, 2*np.pi, 100)
+        boundary_x = a * np.cos(theta)
+        boundary_y = b * np.sin(theta)
+    else:
+        # Default: unit disk
+        theta = np.linspace(0, 2*np.pi, 100)
+        boundary_x = np.cos(theta)
+        boundary_y = np.sin(theta)
     
     # Get max intensity for consistent scaling
     max_true_intensity = max(abs(q) for _, q in sources_true)
@@ -1412,8 +1433,8 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
         for (x, y), q in sources_true:
             color = 'darkred' if q > 0 else 'darkblue'
             size = abs(q) * scale_factor_true
-            ax.scatter(x, y, s=size, facecolors='none', edgecolors=color, 
-                      linewidths=2.5, marker='o', zorder=4)
+            ax.scatter(x, y, s=max(size, 150), facecolors='none', edgecolors=color, 
+                      linewidths=2.5, marker='o', zorder=10)  # Higher zorder
             # Add true intensity label for nonlinear plots
             if result.method_type == 'nonlinear':
                 ax.annotate(f'({q:+.1f})', (x, y), textcoords='offset points',
@@ -1427,8 +1448,27 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
             if show_clusters and result.clusters:
                 title += f", {len(result.clusters)} clusters"
         
-        ax.set_xlim(-1.25, 1.25)
-        ax.set_ylim(-1.25, 1.25)
+        # Set axis limits based on domain type
+        if domain_type in ['square', 'polygon']:
+            if domain_type == 'square':
+                vertices = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+            else:
+                vertices = domain_params.get('vertices') if domain_params else [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]
+            vertices_arr = np.array(vertices)
+            x_min, y_min = vertices_arr.min(axis=0)
+            x_max, y_max = vertices_arr.max(axis=0)
+            margin = 0.15 * max(x_max - x_min, y_max - y_min)
+            ax.set_xlim(x_min - margin, x_max + margin)
+            ax.set_ylim(y_min - margin, y_max + margin)
+        elif domain_type == 'ellipse':
+            a = domain_params.get('a', 2.0) if domain_params else 2.0
+            b = domain_params.get('b', 1.0) if domain_params else 1.0
+            ax.set_xlim(-a * 1.15, a * 1.15)
+            ax.set_ylim(-b * 1.15, b * 1.15)
+        else:
+            ax.set_xlim(-1.25, 1.25)
+            ax.set_ylim(-1.25, 1.25)
+        
         ax.set_aspect('equal')
         ax.set_title(title, fontsize=9)
         ax.grid(True, alpha=0.3)
@@ -1794,6 +1834,521 @@ def compare_with_optimal_alpha(sources_true: List[Tuple[Tuple[float, float], flo
     return results
 
 
+# =============================================================================
+# CONFORMAL SOLVER (ELLIPSE, STAR-SHAPED DOMAINS)
+# =============================================================================
+
+def run_conformal_linear(u_measured, sources_true, conformal_map, 
+                         alpha=1e-4, method='l1') -> ComparisonResult:
+    """Run conformal linear inverse solver for general domains."""
+    try:
+        from .conformal_solver import ConformalLinearInverseSolver, ConformalForwardSolver
+    except ImportError:
+        from conformal_solver import ConformalLinearInverseSolver, ConformalForwardSolver
+    
+    t0 = time()
+    
+    linear = ConformalLinearInverseSolver(conformal_map, n_boundary=len(u_measured), 
+                                          source_resolution=0.15, verbose=False)
+    linear.build_greens_matrix(verbose=False)
+    
+    if method == 'l1':
+        q = linear.solve_l1(u_measured, alpha=alpha)
+    elif method == 'l2':
+        q = linear.solve_l2(u_measured, alpha=alpha)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    elapsed = time() - t0
+    
+    # Find intensity peaks
+    peaks = find_intensity_peaks(
+        linear.interior_points, q,
+        neighbor_radius=0.12,
+        integration_radius=0.20,
+        intensity_threshold_ratio=0.15,
+        min_peak_separation=0.25
+    )
+    
+    # Find clusters
+    clusters = find_intensity_clusters(
+        linear.interior_points, q,
+        eps=0.18, min_samples=2, intensity_threshold_ratio=0.15
+    )
+    
+    peak_metrics = compute_peak_metrics(sources_true, peaks)
+    
+    # Boundary residual
+    u_rec = linear.G @ q
+    u_rec = u_rec - np.mean(u_rec)
+    u_true = u_measured - np.mean(u_measured)
+    boundary_residual = np.linalg.norm(u_rec - u_true) / np.linalg.norm(u_true)
+    
+    clusters_data = [{'centroid': c.centroid, 'total_intensity': c.total_intensity,
+                      'n_points': c.n_points, 'spread': c.spread} for c in clusters]
+    peaks_data = [{'position': p.position, 'peak_intensity': p.peak_intensity,
+                   'integrated_intensity': p.integrated_intensity, 'n_neighbors': p.n_neighbors} for p in peaks]
+    
+    return ComparisonResult(
+        solver_name=f"Conformal Linear ({method.upper()})",
+        method_type='linear',
+        forward_type='conformal',
+        position_rmse=peak_metrics['position_rmse'],
+        intensity_rmse=peak_metrics['intensity_rmse'],
+        boundary_residual=boundary_residual,
+        time_seconds=elapsed,
+        sources_recovered=[(p.position, p.integrated_intensity) for p in peaks],
+        grid_positions=linear.interior_points.copy(),
+        grid_intensities=q.copy(),
+        clusters=clusters_data,
+        peaks=peaks_data
+    )
+
+
+def run_conformal_nonlinear(u_measured, sources_true, conformal_map, n_sources=4,
+                            optimizer='differential_evolution', seed=42) -> ComparisonResult:
+    """Run conformal nonlinear inverse solver for general domains."""
+    try:
+        from .conformal_solver import ConformalNonlinearInverseSolver
+    except ImportError:
+        from conformal_solver import ConformalNonlinearInverseSolver
+    
+    t0 = time()
+    
+    inverse = ConformalNonlinearInverseSolver(conformal_map, n_sources=n_sources, 
+                                               n_boundary=len(u_measured))
+    inverse.set_measured_data(u_measured)
+    result = inverse.solve(method=optimizer, seed=seed)
+    
+    elapsed = time() - t0
+    
+    sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+    
+    # Forward solve for boundary residual
+    try:
+        from .conformal_solver import ConformalForwardSolver
+    except ImportError:
+        from conformal_solver import ConformalForwardSolver
+    
+    forward = ConformalForwardSolver(conformal_map, n_boundary=len(u_measured))
+    u_rec = forward.solve(sources_rec)
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    return ComparisonResult(
+        solver_name=f"Conformal Nonlinear ({optimizer[:8]})",
+        method_type='nonlinear',
+        forward_type='conformal',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        iterations=result.iterations,
+        sources_recovered=sources_rec
+    )
+
+
+# =============================================================================
+# POLYGON SOLVER (FEM-BASED)
+# =============================================================================
+
+def run_fem_polygon_linear(u_measured, sources_true, vertices,
+                           alpha=1e-4, method='l1') -> ComparisonResult:
+    """
+    Run FEM linear inverse solver for polygon domain.
+    
+    Parameters
+    ----------
+    u_measured : array
+        Boundary measurements
+    sources_true : list of ((x, y), q)
+        True sources for metric computation
+    vertices : list of (x, y)
+        Polygon vertices
+    alpha : float
+        Regularization parameter
+    method : str
+        'l1', 'l2', or 'tv'
+    """
+    try:
+        from .fem_solver import FEMLinearInverseSolver
+    except ImportError:
+        from fem_solver import FEMLinearInverseSolver
+    
+    t0 = time()
+    
+    # Create solver for polygon
+    linear = FEMLinearInverseSolver.from_polygon(vertices, forward_resolution=0.1,
+                                                  source_resolution=0.15, verbose=False)
+    linear.build_greens_matrix(verbose=False)
+    
+    if method == 'l1':
+        q = linear.solve_l1(u_measured, alpha=alpha)
+    elif method == 'l2':
+        q = linear.solve_l2(u_measured, alpha=alpha)
+    elif method == 'tv':
+        q = linear.solve_tv(u_measured, alpha=alpha)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    elapsed = time() - t0
+    
+    # Find intensity peaks
+    peaks = find_intensity_peaks(
+        linear.interior_points, q,
+        neighbor_radius=0.12,
+        integration_radius=0.20,
+        intensity_threshold_ratio=0.15,
+        min_peak_separation=0.25
+    )
+    
+    # Find clusters
+    clusters = find_intensity_clusters(
+        linear.interior_points, q,
+        eps=0.18, min_samples=2, intensity_threshold_ratio=0.15
+    )
+    
+    peak_metrics = compute_peak_metrics(sources_true, peaks)
+    
+    # Boundary residual
+    u_rec = linear.G @ q
+    u_rec = u_rec - np.mean(u_rec)
+    u_true = u_measured - np.mean(u_measured)
+    boundary_residual = np.linalg.norm(u_rec - u_true) / np.linalg.norm(u_true)
+    
+    clusters_data = [{'centroid': c.centroid, 'total_intensity': c.total_intensity,
+                      'n_points': c.n_points, 'spread': c.spread} for c in clusters]
+    peaks_data = [{'position': p.position, 'peak_intensity': p.peak_intensity,
+                   'integrated_intensity': p.integrated_intensity, 'n_neighbors': p.n_neighbors} for p in peaks]
+    
+    return ComparisonResult(
+        solver_name=f"FEM Polygon Linear ({method.upper()})",
+        method_type='linear',
+        forward_type='fem_polygon',
+        position_rmse=peak_metrics['position_rmse'],
+        intensity_rmse=peak_metrics['intensity_rmse'],
+        boundary_residual=boundary_residual,
+        time_seconds=elapsed,
+        sources_recovered=[(p.position, p.integrated_intensity) for p in peaks],
+        grid_positions=linear.interior_points.copy(),
+        grid_intensities=q.copy(),
+        clusters=clusters_data,
+        peaks=peaks_data
+    )
+
+
+def run_fem_polygon_nonlinear(u_measured, sources_true, vertices, n_sources=4,
+                               optimizer='differential_evolution', seed=42) -> ComparisonResult:
+    """
+    Run FEM nonlinear inverse solver for polygon domain.
+    
+    Parameters
+    ----------
+    u_measured : array
+        Boundary measurements
+    sources_true : list of ((x, y), q)
+        True sources for metric computation
+    vertices : list of (x, y)
+        Polygon vertices
+    n_sources : int
+        Number of sources to recover
+    optimizer : str
+        Optimization method
+    seed : int
+        Random seed
+    """
+    try:
+        from .fem_solver import FEMNonlinearInverseSolver, FEMForwardSolver
+        from .mesh import create_polygon_mesh
+    except ImportError:
+        from fem_solver import FEMNonlinearInverseSolver, FEMForwardSolver
+        from mesh import create_polygon_mesh
+    
+    t0 = time()
+    
+    # Use same mesh for forward and inverse
+    mesh_data = create_polygon_mesh(vertices, 0.1)
+    
+    inverse = FEMNonlinearInverseSolver.from_polygon(vertices, n_sources=n_sources,
+                                                      resolution=0.1, verbose=False)
+    inverse.set_measured_data(u_measured)
+    
+    # Use seed for reproducibility
+    np.random.seed(seed)
+    
+    if optimizer == 'differential_evolution':
+        result = inverse.solve(method='differential_evolution', maxiter=500)
+    else:
+        result = inverse.solve(method=optimizer, n_restarts=5, maxiter=1000)
+    
+    elapsed = time() - t0
+    
+    sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+    
+    # Forward solve for boundary residual using SAME mesh
+    forward = FEMForwardSolver(resolution=0.1, verbose=False, mesh_data=mesh_data)
+    u_rec = forward.solve(sources_rec)
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    return ComparisonResult(
+        solver_name=f"FEM Polygon Nonlinear ({optimizer[:8]})",
+        method_type='nonlinear',
+        forward_type='fem_polygon',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        iterations=result.iterations,
+        sources_recovered=sources_rec
+    )
+
+
+# =============================================================================
+# DOMAIN-SPECIFIC COMPARISON UTILITIES
+# =============================================================================
+
+def create_domain_sources(domain_type: str, domain_params: dict = None) -> List[Tuple[Tuple[float, float], float]]:
+    """
+    Create test sources appropriate for a given domain.
+    
+    Parameters
+    ----------
+    domain_type : str
+        'disk', 'ellipse', 'square', 'polygon'
+    domain_params : dict
+        Domain-specific parameters (e.g., {'a': 2.0, 'b': 1.0} for ellipse)
+    """
+    if domain_type == 'disk':
+        return [
+            ((-0.3, 0.4), 1.0),
+            ((0.5, 0.3), 1.0),
+            ((-0.4, -0.4), -1.0),
+            ((0.3, -0.5), -1.0),
+        ]
+    elif domain_type == 'ellipse':
+        a = domain_params.get('a', 2.0) if domain_params else 2.0
+        b = domain_params.get('b', 1.0) if domain_params else 1.0
+        # Scale sources to fit inside ellipse
+        return [
+            ((-0.5*a, 0.4*b), 1.0),
+            ((0.6*a, 0.3*b), 1.0),
+            ((-0.4*a, -0.4*b), -1.0),
+            ((0.3*a, -0.5*b), -1.0),
+        ]
+    elif domain_type == 'square':
+        return [
+            ((-0.5, 0.5), 1.0),
+            ((0.5, 0.5), 1.0),
+            ((-0.5, -0.5), -1.0),
+            ((0.5, -0.5), -1.0),
+        ]
+    elif domain_type == 'polygon':
+        # For L-shaped or custom polygon, place sources in interior
+        return [
+            ((0.5, 0.5), 1.0),
+            ((1.5, 0.5), 1.0),
+            ((0.5, 1.5), -1.0),
+            ((1.5, 0.3), -1.0),
+        ]
+    else:
+        raise ValueError(f"Unknown domain type: {domain_type}")
+
+
+def get_conformal_map(domain_type: str, domain_params: dict = None):
+    """
+    Get appropriate conformal map for domain type.
+    
+    Parameters
+    ----------
+    domain_type : str
+        'disk', 'ellipse', 'star'
+    domain_params : dict
+        Parameters for the domain
+    
+    Returns
+    -------
+    conformal_map : ConformalMap instance
+    """
+    try:
+        from .conformal_solver import DiskMap, EllipseMap, StarShapedMap
+    except ImportError:
+        from conformal_solver import DiskMap, EllipseMap, StarShapedMap
+    
+    if domain_type == 'disk':
+        return DiskMap(radius=domain_params.get('radius', 1.0) if domain_params else 1.0)
+    elif domain_type == 'ellipse':
+        a = domain_params.get('a', 2.0) if domain_params else 2.0
+        b = domain_params.get('b', 1.0) if domain_params else 1.0
+        return EllipseMap(a=a, b=b)
+    elif domain_type == 'star':
+        n_petals = domain_params.get('n_petals', 5) if domain_params else 5
+        amplitude = domain_params.get('amplitude', 0.3) if domain_params else 0.3
+        def radius_func(theta):
+            return 1.0 + amplitude * np.cos(n_petals * theta)
+        return StarShapedMap(radius_func)
+    else:
+        raise ValueError(f"Unknown conformal domain type: {domain_type}")
+
+
+def run_domain_comparison(domain_type: str = 'disk', 
+                          domain_params: dict = None,
+                          sources: List = None,
+                          noise_level: float = 0.001,
+                          alpha: float = 1e-4,
+                          methods: List[str] = None,
+                          include_nonlinear: bool = True,
+                          seed: int = 42) -> List[ComparisonResult]:
+    """
+    Run solver comparison on a specified domain.
+    
+    Parameters
+    ----------
+    domain_type : str
+        'disk', 'ellipse', 'star', 'square', 'polygon'
+    domain_params : dict
+        Domain parameters (e.g., {'a': 2.0, 'b': 1.0} for ellipse,
+        {'vertices': [...]} for polygon)
+    sources : list, optional
+        Custom source configuration. If None, uses domain-appropriate defaults.
+    noise_level : float
+        Noise level for measurements
+    alpha : float
+        Regularization parameter for linear solvers
+    methods : list
+        Regularization methods ['l1', 'l2', 'tv']
+    include_nonlinear : bool
+        Whether to include nonlinear solvers
+    seed : int
+        Random seed
+    
+    Returns
+    -------
+    results : list of ComparisonResult
+    """
+    if methods is None:
+        methods = ['l1', 'l2']
+    
+    if sources is None:
+        sources = create_domain_sources(domain_type, domain_params)
+    
+    results = []
+    
+    # Generate boundary data
+    if domain_type in ['disk', 'ellipse', 'star']:
+        conformal_map = get_conformal_map(domain_type, domain_params)
+        
+        try:
+            from .conformal_solver import ConformalForwardSolver
+        except ImportError:
+            from conformal_solver import ConformalForwardSolver
+        
+        forward = ConformalForwardSolver(conformal_map, n_boundary=100)
+        u = forward.solve(sources)
+        
+        # Add noise
+        if noise_level > 0:
+            np.random.seed(seed)
+            u = u + noise_level * np.std(u) * np.random.randn(len(u))
+        
+        # Run linear solvers
+        for method in methods:
+            if method in ['l1', 'l2']:
+                result = run_conformal_linear(u, sources, conformal_map, 
+                                              alpha=alpha, method=method)
+                results.append(result)
+        
+        # Run nonlinear solver
+        if include_nonlinear:
+            result = run_conformal_nonlinear(u, sources, conformal_map,
+                                             n_sources=len(sources), seed=seed)
+            results.append(result)
+    
+    elif domain_type in ['square', 'polygon']:
+        # Get vertices
+        if domain_type == 'square':
+            vertices = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        else:
+            vertices = domain_params.get('vertices') if domain_params else None
+            if vertices is None:
+                # Default L-shaped domain
+                vertices = [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]
+        
+        try:
+            from .fem_solver import FEMForwardSolver
+            from .mesh import create_polygon_mesh
+        except ImportError:
+            from fem_solver import FEMForwardSolver
+            from mesh import create_polygon_mesh
+        
+        # Create FEM forward solver for polygon
+        mesh_data = create_polygon_mesh(vertices, 0.1)
+        forward = FEMForwardSolver(resolution=0.1, verbose=False, mesh_data=mesh_data)
+        u = forward.solve(sources)
+        
+        # Add noise
+        if noise_level > 0:
+            np.random.seed(seed)
+            u = u + noise_level * np.std(u) * np.random.randn(len(u))
+        
+        # Run linear solvers
+        for method in methods:
+            if method in ['l1', 'l2', 'tv']:
+                result = run_fem_polygon_linear(u, sources, vertices,
+                                                alpha=alpha, method=method)
+                results.append(result)
+        
+        # Run nonlinear solver
+        if include_nonlinear:
+            result = run_fem_polygon_nonlinear(u, sources, vertices,
+                                               n_sources=len(sources), seed=seed)
+            results.append(result)
+    
+    return results
+
+
+def compare_domains(domains: List[str] = None, 
+                    noise_level: float = 0.001,
+                    alpha: float = 1e-4,
+                    seed: int = 42) -> Dict[str, List[ComparisonResult]]:
+    """
+    Compare solver performance across different domain types.
+    
+    Parameters
+    ----------
+    domains : list
+        Domain types to compare (default: ['disk', 'ellipse'])
+    
+    Returns
+    -------
+    results_by_domain : dict
+        {domain_type: [ComparisonResult, ...]}
+    """
+    if domains is None:
+        domains = ['disk', 'ellipse']
+    
+    results_by_domain = {}
+    
+    for domain in domains:
+        print(f"\n{'='*60}")
+        print(f"Domain: {domain.upper()}")
+        print('='*60)
+        
+        results = run_domain_comparison(domain, noise_level=noise_level, 
+                                        alpha=alpha, seed=seed)
+        results_by_domain[domain] = results
+        
+        for r in results:
+            print(f"  {r.solver_name}: Pos RMSE={r.position_rmse:.3f}, "
+                  f"Int RMSE={r.intensity_rmse:.3f}")
+    
+    return results_by_domain
+
+
 def main():
     """Main entry point for comparison script."""
     import argparse
@@ -1805,32 +2360,54 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--save', type=str, default=None, help='Save figure to path')
     parser.add_argument('--no-plot', action='store_true', help='Skip plotting')
+    parser.add_argument('--domain', type=str, default='disk',
+                       choices=['disk', 'ellipse', 'star'],
+                       help='Domain type (default: disk)')
+    parser.add_argument('--ellipse-a', type=float, default=2.0, help='Ellipse semi-major axis')
+    parser.add_argument('--ellipse-b', type=float, default=1.0, help='Ellipse semi-minor axis')
     args = parser.parse_args()
     
-    # Test sources
-    sources_true = [
-        ((-0.3, 0.4), 1.0),
-        ((0.5, 0.3), 1.0),
-        ((-0.4, -0.4), -1.0),
-        ((0.3, -0.5), -1.0),
-    ]
+    # Domain parameters
+    domain_params = None
+    if args.domain == 'ellipse':
+        domain_params = {'a': args.ellipse_a, 'b': args.ellipse_b}
+    
+    # Get appropriate test sources for domain
+    sources_true = create_domain_sources(args.domain, domain_params)
     
     print("="*60)
     print("INVERSE SOURCE LOCALIZATION - SOLVER COMPARISON")
     print("="*60)
-    print(f"\nTrue sources: {len(sources_true)}")
+    print(f"\nDomain: {args.domain}")
+    if args.domain == 'ellipse':
+        print(f"  Semi-axes: a={args.ellipse_a}, b={args.ellipse_b}")
+    print(f"True sources: {len(sources_true)}")
     print(f"Noise level: {args.noise}")
     print(f"Alpha (linear): {args.alpha}")
     print(f"Seed: {args.seed}")
     
-    # Run comparison
-    results = compare_all_solvers(
-        sources_true,
-        noise_level=args.noise,
-        alpha_linear=args.alpha,
-        quick=args.quick,
-        seed=args.seed
-    )
+    # Run comparison based on domain
+    if args.domain == 'disk':
+        # Use original disk comparison
+        results = compare_all_solvers(
+            sources_true,
+            noise_level=args.noise,
+            alpha_linear=args.alpha,
+            quick=args.quick,
+            seed=args.seed
+        )
+    else:
+        # Use domain-specific comparison
+        results = run_domain_comparison(
+            args.domain,
+            domain_params=domain_params,
+            sources=sources_true,
+            noise_level=args.noise,
+            alpha=args.alpha,
+            methods=['l1', 'l2'],
+            include_nonlinear=not args.quick,
+            seed=args.seed
+        )
     
     # Print table
     print_comparison_table(results)

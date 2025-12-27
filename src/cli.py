@@ -114,6 +114,15 @@ Examples:
                                help='Save figure to path (overrides auto-naming)')
     compare_parser.add_argument('--no-plot', action='store_true',
                                help='Skip plotting')
+    compare_parser.add_argument('--domain', type=str, default='disk',
+                               choices=['disk', 'ellipse', 'star', 'square', 'polygon'],
+                               help='Domain type (default: disk)')
+    compare_parser.add_argument('--ellipse-a', type=float, default=2.0,
+                               help='Ellipse semi-major axis (for --domain ellipse)')
+    compare_parser.add_argument('--ellipse-b', type=float, default=1.0,
+                               help='Ellipse semi-minor axis (for --domain ellipse)')
+    compare_parser.add_argument('--vertices', type=str, default=None,
+                               help='Polygon vertices as JSON, e.g., "[[0,0],[2,0],[2,1],[1,1],[1,2],[0,2]]"')
     
     # Info command
     info_parser = subparsers.add_parser('info', help='Package information')
@@ -438,34 +447,51 @@ For more information:
 def run_compare(args):
     """Run solver comparison with results tracking."""
     from .comparison import (compare_all_solvers, compare_with_optimal_alpha, 
-                            print_comparison_table, plot_comparison)
+                            print_comparison_table, plot_comparison,
+                            run_domain_comparison, create_domain_sources)
     import matplotlib.pyplot as plt
     import hashlib
     import json
     from pathlib import Path
     from datetime import datetime
+    import json as json_module
     
-    # Test sources
-    sources_true = [
-        ((-0.3, 0.4), 1.0),
-        ((0.5, 0.3), 1.0),
-        ((-0.4, -0.4), -1.0),
-        ((0.3, -0.5), -1.0),
-    ]
+    # Domain parameters
+    domain_params = None
+    if args.domain == 'ellipse':
+        domain_params = {'a': args.ellipse_a, 'b': args.ellipse_b}
+    elif args.domain == 'polygon':
+        if args.vertices:
+            try:
+                vertices = json_module.loads(args.vertices)
+                # Convert to list of tuples
+                domain_params = {'vertices': [tuple(v) for v in vertices]}
+            except json_module.JSONDecodeError:
+                print(f"Error: Invalid JSON for vertices: {args.vertices}")
+                print("Example: --vertices '[[0,0],[2,0],[2,1],[1,1],[1,2],[0,2]]'")
+                return
+        else:
+            # Default L-shaped domain
+            domain_params = {'vertices': [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]}
+    
+    # Get test sources appropriate for domain
+    sources_true = create_domain_sources(args.domain, domain_params)
     
     # Create hash from key parameters
-    param_str = f"seed={args.seed}_noise={args.noise}_optimal={args.optimal}"
+    param_str = f"domain={args.domain}_seed={args.seed}_noise={args.noise}_optimal={args.optimal}"
     if not args.optimal:
         param_str += f"_alpha={args.alpha}"
     param_hash = hashlib.md5(param_str.encode()).hexdigest()[:8]
     
     # Create output directory
-    output_dir = Path(args.output_dir) / f"run_{param_hash}"
+    output_dir = Path(args.output_dir) / f"run_{args.domain}_{param_hash}"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Save parameters
     params = {
         'timestamp': datetime.now().isoformat(),
+        'domain': args.domain,
+        'domain_params': domain_params,
         'seed': args.seed,
         'noise_level': args.noise,
         'optimal_alpha': args.optimal,
@@ -483,44 +509,72 @@ def run_compare(args):
     print("="*70)
     print("INVERSE SOURCE LOCALIZATION - SOLVER COMPARISON")
     print("="*70)
-    print(f"\nOutput directory: {output_dir}")
+    print(f"\nDomain: {args.domain}")
+    if args.domain == 'ellipse':
+        print(f"  Semi-axes: a={args.ellipse_a}, b={args.ellipse_b}")
+    elif args.domain in ['polygon', 'square']:
+        vertices = domain_params.get('vertices') if domain_params else None
+        if vertices:
+            print(f"  Vertices: {len(vertices)} points")
+    print(f"Output directory: {output_dir}")
     print(f"Parameter hash: {param_hash}")
     print(f"Seed: {args.seed}")
     print(f"True sources: {len(sources_true)}")
     print(f"Noise level: {args.noise}")
     
-    if args.optimal:
-        print(f"Methods: {args.methods}")
-        print("Mode: Optimal α selection via L-curve")
-        
-        results = compare_with_optimal_alpha(
-            sources_true,
-            noise_level=args.noise,
-            methods=args.methods,
-            include_nonlinear=not args.no_nonlinear,
-            seed=args.seed,
-            verbose=True
-        )
-    elif args.quick:
-        print(f"Alpha (linear): {args.alpha}")
-        print("Mode: Quick (fixed α)")
-        
-        results = compare_all_solvers(
-            sources_true,
-            noise_level=args.noise,
-            alpha_linear=args.alpha,
-            quick=True,
-            seed=args.seed
-        )
+    # Run comparison based on domain
+    if args.domain == 'disk':
+        # Use original disk comparison functions
+        if args.optimal:
+            print(f"Methods: {args.methods}")
+            print("Mode: Optimal α selection via L-curve")
+            
+            results = compare_with_optimal_alpha(
+                sources_true,
+                noise_level=args.noise,
+                methods=args.methods,
+                include_nonlinear=not args.no_nonlinear,
+                seed=args.seed,
+                verbose=True
+            )
+        elif args.quick:
+            print(f"Alpha (linear): {args.alpha}")
+            print("Mode: Quick (fixed α)")
+            
+            results = compare_all_solvers(
+                sources_true,
+                noise_level=args.noise,
+                alpha_linear=args.alpha,
+                quick=True,
+                seed=args.seed
+            )
+        else:
+            print(f"Alpha (linear): {args.alpha}")
+            print("Mode: Full comparison (fixed α)")
+            
+            results = compare_all_solvers(
+                sources_true,
+                noise_level=args.noise,
+                alpha_linear=args.alpha,
+                quick=False,
+                seed=args.seed
+            )
     else:
+        # Use domain-specific comparison
         print(f"Alpha (linear): {args.alpha}")
-        print("Mode: Full comparison (fixed α)")
+        if args.domain in ['square', 'polygon']:
+            print("Mode: Domain-specific (FEM)")
+        else:
+            print("Mode: Domain-specific (conformal mapping)")
         
-        results = compare_all_solvers(
-            sources_true,
+        results = run_domain_comparison(
+            args.domain,
+            domain_params=domain_params,
+            sources=sources_true,
             noise_level=args.noise,
-            alpha_linear=args.alpha,
-            quick=False,
+            alpha=args.alpha,
+            methods=['l1', 'l2'],
+            include_nonlinear=not args.no_nonlinear,
             seed=args.seed
         )
     
@@ -554,7 +608,8 @@ def run_compare(args):
         else:
             save_path = output_dir / 'comparison.png'
         
-        fig = plot_comparison(results, sources_true, save_path=str(save_path))
+        fig = plot_comparison(results, sources_true, save_path=str(save_path),
+                              domain_type=args.domain, domain_params=domain_params)
         print(f"Figure saved to: {save_path}")
         plt.show()
 

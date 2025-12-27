@@ -23,7 +23,12 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass
 
 # Import shared mesh utilities
-from .mesh import create_disk_mesh, get_source_grid
+try:
+    from .mesh import (create_disk_mesh, get_source_grid, create_polygon_mesh, 
+                       get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid)
+except ImportError:
+    from mesh import (create_disk_mesh, get_source_grid, create_polygon_mesh, 
+                      get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid)
 
 
 # Check for DOLFINx availability
@@ -205,14 +210,21 @@ class FEMForwardSolver:
         Mesh element size (smaller = finer mesh). Default 0.1
     verbose : bool
         Print mesh info. Default True
+    mesh_data : tuple, optional
+        Custom mesh (nodes, elements, boundary_indices, interior_indices).
+        If provided, resolution is ignored.
     """
     
-    def __init__(self, resolution: float = 0.1, verbose: bool = True):
+    def __init__(self, resolution: float = 0.1, verbose: bool = True,
+                 mesh_data: Tuple = None):
         self.resolution = resolution
         
-        # Create mesh using shared module
-        self.nodes, self.elements, self.boundary_indices, self.interior_indices = \
-            create_disk_mesh(resolution)
+        # Use custom mesh if provided, otherwise create disk mesh
+        if mesh_data is not None:
+            self.nodes, self.elements, self.boundary_indices, self.interior_indices = mesh_data
+        else:
+            self.nodes, self.elements, self.boundary_indices, self.interior_indices = \
+                create_disk_mesh(resolution)
         
         # Boundary info (sorted by angle for interpolation)
         boundary_points = self.nodes[self.boundary_indices]
@@ -230,6 +242,38 @@ class FEMForwardSolver:
         if verbose:
             print(f"FEM mesh: {len(self.nodes)} nodes, {len(self.elements)} elements, "
                   f"{self.n_boundary} boundary points")
+    
+    @classmethod
+    def from_polygon(cls, vertices: List[Tuple[float, float]], resolution: float = 0.1,
+                     verbose: bool = True) -> 'FEMForwardSolver':
+        """
+        Create solver for polygon domain.
+        
+        Parameters
+        ----------
+        vertices : list of (x, y)
+            Polygon vertices in order (CCW)
+        resolution : float
+            Mesh element size
+        """
+        mesh_data = create_polygon_mesh(vertices, resolution)
+        return cls(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
+    
+    @classmethod
+    def from_ellipse(cls, a: float, b: float, resolution: float = 0.1,
+                     verbose: bool = True) -> 'FEMForwardSolver':
+        """
+        Create solver for ellipse domain.
+        
+        Parameters
+        ----------
+        a, b : float
+            Semi-axes of ellipse
+        resolution : float
+            Mesh element size
+        """
+        mesh_data = create_ellipse_mesh(a, b, resolution)
+        return cls(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
     
     def _assemble_stiffness(self):
         """Assemble stiffness matrix once (only depends on mesh geometry)."""
@@ -314,27 +358,38 @@ class FEMLinearInverseSolver:
         Mesh resolution for source candidate grid (can be coarser)
     verbose : bool
         Print info. Default True
+    mesh_data : tuple, optional
+        Custom mesh (nodes, elements, boundary_indices, interior_indices)
+    source_grid : array, optional
+        Custom source candidate grid (N, 2) array
     """
     
     def __init__(self, forward_resolution: float = 0.1, source_resolution: float = 0.15,
-                 verbose: bool = True):
-        # Forward mesh (finer)
-        self.nodes, self.elements, self.boundary_indices, _ = \
-            create_disk_mesh(forward_resolution)
+                 verbose: bool = True, mesh_data: Tuple = None, source_grid: np.ndarray = None):
+        # Use custom mesh if provided
+        if mesh_data is not None:
+            self.nodes, self.elements, self.boundary_indices, interior_indices = mesh_data
+        else:
+            self.nodes, self.elements, self.boundary_indices, interior_indices = \
+                create_disk_mesh(forward_resolution)
         
         # Pre-assemble stiffness matrix for forward solves
         self._K = assemble_stiffness_matrix(self.nodes, self.elements)
         n_nodes = len(self.nodes)
         self._K_reg = self._K + 1e-10 * diags([1.0] * n_nodes)
         
-        # Source candidate mesh (can be coarser)
-        source_nodes, _, _, source_interior = create_disk_mesh(source_resolution)
+        # Source candidate grid
+        if source_grid is not None:
+            self.interior_points = source_grid
+        else:
+            # Default: use interior of mesh
+            source_nodes, _, _, source_interior = create_disk_mesh(source_resolution)
+            self.interior_points = source_nodes[source_interior]
+            # Filter to r < 0.9 to stay well inside domain
+            radii = np.sqrt(self.interior_points[:, 0]**2 + self.interior_points[:, 1]**2)
+            mask = radii < 0.9
+            self.interior_points = self.interior_points[mask]
         
-        # Filter to r < 0.9 to stay well inside domain
-        self.interior_points = source_nodes[source_interior]
-        radii = np.sqrt(self.interior_points[:, 0]**2 + self.interior_points[:, 1]**2)
-        mask = radii < 0.9
-        self.interior_points = self.interior_points[mask]
         self.n_interior = len(self.interior_points)
         
         # Sort boundary by angle
@@ -349,6 +404,40 @@ class FEMLinearInverseSolver:
         
         if verbose:
             print(f"FEM Linear: {self.n_boundary} boundary, {self.n_interior} source candidates")
+    
+    @classmethod
+    def from_polygon(cls, vertices: List[Tuple[float, float]], 
+                     forward_resolution: float = 0.1, source_resolution: float = 0.15,
+                     verbose: bool = True) -> 'FEMLinearInverseSolver':
+        """
+        Create solver for polygon domain.
+        
+        Parameters
+        ----------
+        vertices : list of (x, y)
+            Polygon vertices in order (CCW)
+        """
+        mesh_data = create_polygon_mesh(vertices, forward_resolution)
+        source_grid = get_polygon_source_grid(vertices, source_resolution, margin=0.1)
+        return cls(forward_resolution=forward_resolution, source_resolution=source_resolution,
+                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid)
+    
+    @classmethod
+    def from_ellipse(cls, a: float, b: float,
+                     forward_resolution: float = 0.1, source_resolution: float = 0.15,
+                     verbose: bool = True) -> 'FEMLinearInverseSolver':
+        """
+        Create solver for ellipse domain.
+        
+        Parameters
+        ----------
+        a, b : float
+            Semi-axes of ellipse
+        """
+        mesh_data = create_ellipse_mesh(a, b, forward_resolution)
+        source_grid = get_ellipse_source_grid(a, b, source_resolution, margin=0.1)
+        return cls(forward_resolution=forward_resolution, source_resolution=source_resolution,
+                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid)
     
     def build_greens_matrix(self, verbose: bool = True):
         """
@@ -526,13 +615,69 @@ class FEMNonlinearInverseSolver:
         Mesh resolution for FEM forward solver
     verbose : bool
         Print info. Default False (quiet during optimization)
+    mesh_data : tuple, optional
+        Custom mesh (nodes, elements, boundary_indices, interior_indices)
+    bounds : tuple, optional
+        Custom bounds for source positions ((x_min, x_max), (y_min, y_max))
     """
     
-    def __init__(self, n_sources: int, resolution: float = 0.1, verbose: bool = False):
+    def __init__(self, n_sources: int, resolution: float = 0.1, verbose: bool = False,
+                 mesh_data: Tuple = None, bounds: Tuple = None):
         self.n_sources = n_sources
-        self.forward = FEMForwardSolver(resolution=resolution, verbose=verbose)
+        self.forward = FEMForwardSolver(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
         self.u_measured = None
         self.history = []
+        
+        # Default bounds for unit disk
+        if bounds is None:
+            self.x_bounds = (-0.9, 0.9)
+            self.y_bounds = (-0.9, 0.9)
+        else:
+            self.x_bounds = bounds[0]
+            self.y_bounds = bounds[1]
+    
+    @classmethod
+    def from_polygon(cls, vertices: List[Tuple[float, float]], n_sources: int,
+                     resolution: float = 0.1, verbose: bool = False) -> 'FEMNonlinearInverseSolver':
+        """
+        Create solver for polygon domain.
+        
+        Parameters
+        ----------
+        vertices : list of (x, y)
+            Polygon vertices in order (CCW)
+        n_sources : int
+            Number of sources to recover
+        """
+        mesh_data = create_polygon_mesh(vertices, resolution)
+        
+        # Compute bounds from vertices
+        vertices_arr = np.array(vertices)
+        x_min, y_min = vertices_arr.min(axis=0)
+        x_max, y_max = vertices_arr.max(axis=0)
+        margin = 0.1 * min(x_max - x_min, y_max - y_min)
+        bounds = ((x_min + margin, x_max - margin), (y_min + margin, y_max - margin))
+        
+        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
+                   mesh_data=mesh_data, bounds=bounds)
+    
+    @classmethod
+    def from_ellipse(cls, a: float, b: float, n_sources: int,
+                     resolution: float = 0.1, verbose: bool = False) -> 'FEMNonlinearInverseSolver':
+        """
+        Create solver for ellipse domain.
+        
+        Parameters
+        ----------
+        a, b : float
+            Semi-axes of ellipse
+        n_sources : int
+            Number of sources to recover
+        """
+        mesh_data = create_ellipse_mesh(a, b, resolution)
+        bounds = ((-0.85*a, 0.85*a), (-0.85*b, 0.85*b))
+        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
+                   mesh_data=mesh_data, bounds=bounds)
     
     def set_measured_data(self, u_measured: np.ndarray):
         """Set the measured boundary data."""
@@ -602,10 +747,10 @@ class FEMNonlinearInverseSolver:
         self.history = []
         n = self.n_sources
         
-        # Bounds
+        # Bounds - use stored bounds for custom domains
         bounds = []
         for i in range(n):
-            bounds.extend([(-0.8, 0.8), (-0.8, 0.8)])
+            bounds.extend([self.x_bounds, self.y_bounds])
             if i < n - 1:
                 bounds.append((-5.0, 5.0))
         
