@@ -44,6 +44,388 @@ class ComparisonResult:
     # Full intensity field (for linear solvers)
     grid_positions: Optional[np.ndarray] = None  # (M, 2) grid point positions
     grid_intensities: Optional[np.ndarray] = None  # (M,) intensity at each grid point
+    
+    # Cluster information (for linear solvers) - DBSCAN based
+    clusters: Optional[List[Dict]] = None  # List of cluster info dicts
+    
+    # Peak information (for linear solvers) - local maxima/minima based
+    peaks: Optional[List[Dict]] = None  # List of peak info dicts
+
+
+@dataclass
+class ClusterInfo:
+    """Information about a detected intensity cluster."""
+    centroid: Tuple[float, float]  # Intensity-weighted center
+    total_intensity: float  # Sum of intensities (with sign)
+    n_points: int  # Number of grid points in cluster
+    spread: float  # Intensity-weighted std dev from centroid
+
+
+@dataclass
+class PeakInfo:
+    """Information about a detected intensity peak."""
+    position: Tuple[float, float]  # Peak location
+    peak_intensity: float  # Intensity at the peak point
+    integrated_intensity: float  # Sum of intensities in neighborhood
+    n_neighbors: int  # Number of points in integration neighborhood
+
+
+def find_intensity_peaks(grid_positions: np.ndarray,
+                         grid_intensities: np.ndarray,
+                         neighbor_radius: float = 0.15,
+                         integration_radius: float = 0.20,
+                         intensity_threshold_ratio: float = 0.1,
+                         min_peak_separation: float = 0.15) -> List[PeakInfo]:
+    """
+    Find peaks (local maxima for positive, local minima for negative) in intensity field.
+    
+    This works better than DBSCAN for smooth fields (L2, TV) where intensity
+    doesn't drop to zero between sources.
+    
+    Parameters
+    ----------
+    grid_positions : array (M, 2)
+        Grid point coordinates
+    grid_intensities : array (M,)
+        Intensity at each grid point
+    neighbor_radius : float
+        Radius to search for neighbors when determining if point is a peak
+    integration_radius : float
+        Radius for integrating intensity around each peak
+    intensity_threshold_ratio : float
+        Only consider points with |q| > ratio * max(|q|)
+    min_peak_separation : float
+        Minimum distance between peaks (suppress nearby weaker peaks)
+        
+    Returns
+    -------
+    peaks : list of PeakInfo
+        Detected peaks sorted by |integrated_intensity|
+    """
+    from scipy.spatial import cKDTree
+    
+    threshold = intensity_threshold_ratio * np.max(np.abs(grid_intensities))
+    
+    # Build KD-tree for efficient neighbor queries
+    tree = cKDTree(grid_positions)
+    
+    peaks = []
+    
+    # Process positive and negative separately
+    for sign in [1, -1]:
+        if sign > 0:
+            significant_mask = grid_intensities > threshold
+        else:
+            significant_mask = grid_intensities < -threshold
+        
+        if not np.any(significant_mask):
+            continue
+        
+        significant_indices = np.where(significant_mask)[0]
+        
+        # Find local maxima (for positive) or minima (for negative)
+        peak_indices = []
+        for idx in significant_indices:
+            pos = grid_positions[idx]
+            intensity = grid_intensities[idx]
+            
+            # Find neighbors
+            neighbor_indices = tree.query_ball_point(pos, neighbor_radius)
+            neighbor_indices = [i for i in neighbor_indices if i != idx]
+            
+            if len(neighbor_indices) == 0:
+                # Isolated point - consider it a peak
+                is_peak = True
+            else:
+                neighbor_intensities = grid_intensities[neighbor_indices]
+                if sign > 0:
+                    # For positive: local maximum
+                    is_peak = intensity >= np.max(neighbor_intensities)
+                else:
+                    # For negative: local minimum
+                    is_peak = intensity <= np.min(neighbor_intensities)
+            
+            if is_peak:
+                peak_indices.append(idx)
+        
+        # Suppress nearby peaks (keep strongest)
+        peak_indices = _suppress_nearby_peaks(
+            peak_indices, grid_positions, grid_intensities, 
+            min_peak_separation, sign
+        )
+        
+        # Compute integrated intensity for each peak
+        for idx in peak_indices:
+            pos = grid_positions[idx]
+            peak_intensity = grid_intensities[idx]
+            
+            # Integrate in neighborhood
+            neighbor_indices = tree.query_ball_point(pos, integration_radius)
+            integrated = np.sum(grid_intensities[neighbor_indices])
+            
+            peaks.append(PeakInfo(
+                position=(float(pos[0]), float(pos[1])),
+                peak_intensity=float(peak_intensity),
+                integrated_intensity=float(integrated),
+                n_neighbors=len(neighbor_indices)
+            ))
+    
+    # Sort by absolute integrated intensity
+    peaks.sort(key=lambda p: abs(p.integrated_intensity), reverse=True)
+    
+    return peaks
+
+
+def _suppress_nearby_peaks(peak_indices: List[int], 
+                           positions: np.ndarray,
+                           intensities: np.ndarray,
+                           min_separation: float,
+                           sign: int) -> List[int]:
+    """
+    Suppress weaker peaks that are too close to stronger ones.
+    
+    Parameters
+    ----------
+    peak_indices : list of int
+        Indices of candidate peaks
+    positions : array (M, 2)
+    intensities : array (M,)
+    min_separation : float
+        Minimum distance between peaks
+    sign : int
+        +1 for positive peaks (keep maxima), -1 for negative (keep minima)
+    
+    Returns
+    -------
+    filtered_indices : list of int
+        Indices of peaks after suppression
+    """
+    if len(peak_indices) <= 1:
+        return peak_indices
+    
+    # Sort by intensity (strongest first)
+    if sign > 0:
+        sorted_indices = sorted(peak_indices, key=lambda i: intensities[i], reverse=True)
+    else:
+        sorted_indices = sorted(peak_indices, key=lambda i: intensities[i])  # Most negative first
+    
+    kept = []
+    for idx in sorted_indices:
+        pos = positions[idx]
+        # Check distance to all kept peaks
+        too_close = False
+        for kept_idx in kept:
+            dist = np.linalg.norm(pos - positions[kept_idx])
+            if dist < min_separation:
+                too_close = True
+                break
+        if not too_close:
+            kept.append(idx)
+    
+    return kept
+
+
+def find_intensity_clusters(grid_positions: np.ndarray, 
+                            grid_intensities: np.ndarray,
+                            eps: float = 0.15,
+                            min_samples: int = 2,
+                            intensity_threshold_ratio: float = 0.1) -> List[ClusterInfo]:
+    """
+    Find clusters of significant intensity using DBSCAN.
+    
+    Positive and negative intensities are clustered separately to avoid
+    merging sources with opposite signs.
+    
+    Note: For smooth fields (L2, TV regularization), this may merge multiple
+    sources into one cluster. Use find_intensity_peaks() for better separation.
+    
+    Parameters
+    ----------
+    grid_positions : array (M, 2)
+        Grid point coordinates
+    grid_intensities : array (M,)
+        Intensity at each grid point
+    eps : float
+        DBSCAN neighborhood radius
+    min_samples : int
+        Minimum points for a cluster
+    intensity_threshold_ratio : float
+        Only consider points with |q| > ratio * max(|q|)
+        
+    Returns
+    -------
+    clusters : list of ClusterInfo
+        Detected clusters sorted by |total_intensity|
+    """
+    from sklearn.cluster import DBSCAN
+    
+    # Threshold to keep only significant intensities
+    threshold = intensity_threshold_ratio * np.max(np.abs(grid_intensities))
+    
+    clusters = []
+    
+    # Process positive and negative intensities separately
+    for sign, sign_name in [(1, 'positive'), (-1, 'negative')]:
+        if sign > 0:
+            mask = grid_intensities > threshold
+        else:
+            mask = grid_intensities < -threshold
+        
+        if not np.any(mask):
+            continue
+        
+        sig_positions = grid_positions[mask]
+        sig_intensities = grid_intensities[mask]
+        
+        # Run DBSCAN on this sign's points
+        if len(sig_positions) < min_samples:
+            # Too few points - treat all as one cluster
+            labels = np.zeros(len(sig_positions), dtype=int)
+        else:
+            clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(sig_positions)
+            labels = clustering.labels_
+        
+        # Extract cluster information
+        unique_labels = set(labels)
+        unique_labels.discard(-1)  # Remove noise label
+        
+        for label in unique_labels:
+            cluster_mask = labels == label
+            cluster_pos = sig_positions[cluster_mask]
+            cluster_int = sig_intensities[cluster_mask]
+            
+            # Total intensity (preserves sign)
+            total_int = np.sum(cluster_int)
+            
+            # Intensity-weighted centroid
+            weights = np.abs(cluster_int)
+            if np.sum(weights) > 0:
+                centroid = np.average(cluster_pos, weights=weights, axis=0)
+            else:
+                centroid = np.mean(cluster_pos, axis=0)
+            
+            # Intensity-weighted spread (std dev from centroid)
+            if np.sum(weights) > 0 and len(cluster_pos) > 1:
+                distances = np.linalg.norm(cluster_pos - centroid, axis=1)
+                spread = np.sqrt(np.average(distances**2, weights=weights))
+            else:
+                spread = 0.0
+            
+            clusters.append(ClusterInfo(
+                centroid=(float(centroid[0]), float(centroid[1])),
+                total_intensity=float(total_int),
+                n_points=int(np.sum(cluster_mask)),
+                spread=float(spread)
+            ))
+    
+    # Sort by absolute intensity (largest first)
+    clusters.sort(key=lambda c: abs(c.total_intensity), reverse=True)
+    
+    return clusters
+
+
+def compute_cluster_metrics(sources_true, clusters: List[ClusterInfo]) -> Dict:
+    """
+    Compute metrics by matching clusters to true sources.
+    
+    Parameters
+    ----------
+    sources_true : list of ((x, y), q)
+    clusters : list of ClusterInfo
+    
+    Returns
+    -------
+    metrics : dict with position_rmse, intensity_rmse based on cluster matching
+    """
+    from scipy.optimize import linear_sum_assignment
+    
+    if len(clusters) == 0:
+        return {
+            'position_rmse': np.inf,
+            'intensity_rmse': np.inf,
+            'n_clusters': 0
+        }
+    
+    true_pos = np.array([s[0] for s in sources_true])
+    true_int = np.array([s[1] for s in sources_true])
+    
+    cluster_pos = np.array([c.centroid for c in clusters])
+    cluster_int = np.array([c.total_intensity for c in clusters])
+    
+    n_true = len(sources_true)
+    n_clusters = len(clusters)
+    
+    # Build cost matrix
+    cost = np.zeros((n_true, n_clusters))
+    for i in range(n_true):
+        for j in range(n_clusters):
+            cost[i, j] = np.linalg.norm(true_pos[i] - cluster_pos[j])
+    
+    # Optimal matching (handles different sizes)
+    row_ind, col_ind = linear_sum_assignment(cost)
+    
+    # Compute errors for matched pairs
+    pos_errors = [cost[i, j] for i, j in zip(row_ind, col_ind)]
+    int_errors = [abs(true_int[i] - cluster_int[j]) for i, j in zip(row_ind, col_ind)]
+    
+    return {
+        'position_rmse': np.sqrt(np.mean(np.array(pos_errors)**2)),
+        'intensity_rmse': np.sqrt(np.mean(np.array(int_errors)**2)),
+        'n_clusters': n_clusters,
+        'matched_pairs': list(zip(row_ind, col_ind))
+    }
+
+
+def compute_peak_metrics(sources_true, peaks: List[PeakInfo]) -> Dict:
+    """
+    Compute metrics by matching peaks to true sources.
+    
+    Parameters
+    ----------
+    sources_true : list of ((x, y), q)
+    peaks : list of PeakInfo
+    
+    Returns
+    -------
+    metrics : dict with position_rmse, intensity_rmse based on peak matching
+    """
+    from scipy.optimize import linear_sum_assignment
+    
+    if len(peaks) == 0:
+        return {
+            'position_rmse': np.inf,
+            'intensity_rmse': np.inf,
+            'n_peaks': 0
+        }
+    
+    true_pos = np.array([s[0] for s in sources_true])
+    true_int = np.array([s[1] for s in sources_true])
+    
+    peak_pos = np.array([p.position for p in peaks])
+    peak_int = np.array([p.integrated_intensity for p in peaks])
+    
+    n_true = len(sources_true)
+    n_peaks = len(peaks)
+    
+    # Build cost matrix
+    cost = np.zeros((n_true, n_peaks))
+    for i in range(n_true):
+        for j in range(n_peaks):
+            cost[i, j] = np.linalg.norm(true_pos[i] - peak_pos[j])
+    
+    # Optimal matching
+    row_ind, col_ind = linear_sum_assignment(cost)
+    
+    # Compute errors for matched pairs
+    pos_errors = [cost[i, j] for i, j in zip(row_ind, col_ind)]
+    int_errors = [abs(true_int[i] - peak_int[j]) for i, j in zip(row_ind, col_ind)]
+    
+    return {
+        'position_rmse': np.sqrt(np.mean(np.array(pos_errors)**2)),
+        'intensity_rmse': np.sqrt(np.mean(np.array(int_errors)**2)),
+        'n_peaks': n_peaks,
+        'matched_pairs': list(zip(row_ind, col_ind))
+    }
 
 
 def compute_metrics(sources_true, sources_recovered, u_true, u_recovered) -> Dict:
@@ -88,6 +470,65 @@ def compute_metrics(sources_true, sources_recovered, u_true, u_recovered) -> Dic
     }
 
 
+def compute_linear_metrics(sources_true, grid_positions, grid_intensities, 
+                           u_true, u_recovered, neighborhood_radius=0.15) -> Dict:
+    """
+    Compute metrics for linear solvers using integrated intensity.
+    
+    For linear solvers, intensity is spread across the grid. We compute
+    the total intensity within a neighborhood of each true source.
+    
+    Parameters
+    ----------
+    sources_true : list of ((x, y), q)
+    grid_positions : array (M, 2)
+    grid_intensities : array (M,)
+    u_true, u_recovered : arrays
+    neighborhood_radius : float
+        Radius for integrating intensity around each true source
+    """
+    from scipy.optimize import linear_sum_assignment
+    
+    true_pos = np.array([s[0] for s in sources_true])
+    true_int = np.array([s[1] for s in sources_true])
+    n_true = len(sources_true)
+    
+    # For each true source, find integrated intensity nearby
+    integrated_int = np.zeros(n_true)
+    for i, (pos, _) in enumerate(sources_true):
+        pos = np.array(pos)
+        distances = np.linalg.norm(grid_positions - pos, axis=1)
+        nearby = distances < neighborhood_radius
+        integrated_int[i] = np.sum(grid_intensities[nearby])
+    
+    # Intensity error using integrated values
+    int_errors = np.abs(true_int - integrated_int)
+    
+    # Position: find peak intensity location for each polarity
+    pos_errors = []
+    for i, ((x, y), q_true) in enumerate(sources_true):
+        # Find grid points with same-sign intensity
+        if q_true > 0:
+            mask = grid_intensities > 0.1 * np.max(grid_intensities)
+        else:
+            mask = grid_intensities < 0.1 * np.min(grid_intensities)
+        
+        if np.any(mask):
+            # Intensity-weighted centroid
+            weights = np.abs(grid_intensities[mask])
+            centroid = np.average(grid_positions[mask], weights=weights, axis=0)
+            pos_errors.append(np.linalg.norm(centroid - np.array([x, y])))
+        else:
+            pos_errors.append(1.0)  # Penalty if no same-sign intensity found
+    
+    return {
+        'position_rmse': np.sqrt(np.mean(np.array(pos_errors)**2)),
+        'intensity_rmse': np.sqrt(np.mean(int_errors**2)),
+        'integrated_intensities': integrated_int,
+        'boundary_residual': np.linalg.norm(u_true - u_recovered) / np.linalg.norm(u_true)
+    }
+
+
 def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> ComparisonResult:
     """Run analytical linear inverse solver (formerly called BEM)."""
     try:
@@ -113,33 +554,67 @@ def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1') -> Compari
     
     elapsed = time() - t0
     
-    # Extract significant sources for metrics computation
-    threshold = 0.1 * np.max(np.abs(q))
-    significant_idx = np.where(np.abs(q) > threshold)[0]
+    # Find intensity clusters (DBSCAN-based)
+    clusters = find_intensity_clusters(
+        linear.interior_points, q,
+        eps=0.18,
+        min_samples=2,
+        intensity_threshold_ratio=0.1
+    )
     
-    sources_rec = []
-    for idx in significant_idx:
-        pos = linear.interior_points[idx]
-        sources_rec.append(((pos[0], pos[1]), q[idx]))
+    # Find intensity peaks (local maxima/minima)
+    peaks = find_intensity_peaks(
+        linear.interior_points, q,
+        neighbor_radius=0.12,
+        integration_radius=0.18,
+        intensity_threshold_ratio=0.15,
+        min_peak_separation=0.25
+    )
+    
+    # Use peak-based metrics (better for smooth fields)
+    peak_metrics = compute_peak_metrics(sources_true, peaks)
     
     # Compute recovered boundary data
     u_rec = linear.G @ q
     u_rec = u_rec - np.mean(u_rec)
-    
     u_true = u_measured - np.mean(u_measured)
-    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    boundary_residual = np.linalg.norm(u_rec - u_true) / np.linalg.norm(u_true)
+    
+    # Convert clusters to list of dicts for storage
+    clusters_data = [
+        {
+            'centroid': c.centroid,
+            'total_intensity': c.total_intensity,
+            'n_points': c.n_points,
+            'spread': c.spread
+        }
+        for c in clusters
+    ]
+    
+    # Convert peaks to list of dicts for storage
+    peaks_data = [
+        {
+            'position': p.position,
+            'peak_intensity': p.peak_intensity,
+            'integrated_intensity': p.integrated_intensity,
+            'n_neighbors': p.n_neighbors
+        }
+        for p in peaks
+    ]
     
     return ComparisonResult(
         solver_name=f"Analytical Linear ({method.upper()})",
         method_type='linear',
         forward_type='bem',
-        position_rmse=metrics['position_rmse'],
-        intensity_rmse=metrics['intensity_rmse'],
-        boundary_residual=metrics['boundary_residual'],
+        position_rmse=peak_metrics['position_rmse'],
+        intensity_rmse=peak_metrics['intensity_rmse'],
+        boundary_residual=boundary_residual,
         time_seconds=elapsed,
-        sources_recovered=sources_rec,
+        sources_recovered=[(p.position, p.integrated_intensity) for p in peaks],
         grid_positions=linear.interior_points.copy(),
-        grid_intensities=q.copy()
+        grid_intensities=q.copy(),
+        clusters=clusters_data,
+        peaks=peaks_data
     )
 
 
@@ -255,33 +730,67 @@ def run_fem_linear(u_measured, sources_true, alpha=1e-3, method='l1') -> Compari
     
     elapsed = time() - t0
     
-    # Extract significant sources for metrics
-    threshold = 0.1 * np.max(np.abs(q))
-    significant_idx = np.where(np.abs(q) > threshold)[0]
+    # Find intensity clusters (DBSCAN-based)
+    clusters = find_intensity_clusters(
+        linear.interior_points, q,
+        eps=0.18,
+        min_samples=2,
+        intensity_threshold_ratio=0.1
+    )
     
-    sources_rec = []
-    for idx in significant_idx:
-        pos = linear.interior_points[idx]
-        sources_rec.append(((pos[0], pos[1]), q[idx]))
+    # Find intensity peaks (local maxima/minima)
+    peaks = find_intensity_peaks(
+        linear.interior_points, q,
+        neighbor_radius=0.12,
+        integration_radius=0.18,
+        intensity_threshold_ratio=0.15,
+        min_peak_separation=0.25
+    )
+    
+    # Use peak-based metrics
+    peak_metrics = compute_peak_metrics(sources_true, peaks)
     
     # Compute recovered boundary data
     u_rec = linear.G @ q
     u_rec = u_rec - np.mean(u_rec)
-    
     u_true = u_fem - np.mean(u_fem)
-    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    boundary_residual = np.linalg.norm(u_rec - u_true) / np.linalg.norm(u_true)
+    
+    # Convert clusters to list of dicts
+    clusters_data = [
+        {
+            'centroid': c.centroid,
+            'total_intensity': c.total_intensity,
+            'n_points': c.n_points,
+            'spread': c.spread
+        }
+        for c in clusters
+    ]
+    
+    # Convert peaks to list of dicts
+    peaks_data = [
+        {
+            'position': p.position,
+            'peak_intensity': p.peak_intensity,
+            'integrated_intensity': p.integrated_intensity,
+            'n_neighbors': p.n_neighbors
+        }
+        for p in peaks
+    ]
     
     return ComparisonResult(
         solver_name=f"FEM Linear ({method.upper()})",
         method_type='linear',
         forward_type='fem',
-        position_rmse=metrics['position_rmse'],
-        intensity_rmse=metrics['intensity_rmse'],
-        boundary_residual=metrics['boundary_residual'],
+        position_rmse=peak_metrics['position_rmse'],
+        intensity_rmse=peak_metrics['intensity_rmse'],
+        boundary_residual=boundary_residual,
         time_seconds=elapsed,
-        sources_recovered=sources_rec,
+        sources_recovered=[(p.position, p.integrated_intensity) for p in peaks],
         grid_positions=linear.interior_points.copy(),
-        grid_intensities=q.copy()
+        grid_intensities=q.copy(),
+        clusters=clusters_data,
+        peaks=peaks_data
     )
 
 
@@ -391,31 +900,67 @@ def run_bem_numerical_linear(u_measured, sources_true, alpha=1e-4, method='l1') 
     
     elapsed = time() - t0
     
-    # Extract significant sources
-    threshold = 0.1 * np.max(np.abs(q))
-    significant = np.where(np.abs(q) > threshold)[0]
+    # Find intensity clusters (DBSCAN-based)
+    clusters = find_intensity_clusters(
+        linear.interior_points, q,
+        eps=0.18,
+        min_samples=2,
+        intensity_threshold_ratio=0.1
+    )
     
-    sources_rec = []
-    for idx in significant:
-        pos = linear.interior_points[idx]
-        sources_rec.append(((pos[0], pos[1]), q[idx]))
+    # Find intensity peaks (local maxima/minima)
+    peaks = find_intensity_peaks(
+        linear.interior_points, q,
+        neighbor_radius=0.12,
+        integration_radius=0.18,
+        intensity_threshold_ratio=0.15,
+        min_peak_separation=0.25
+    )
     
-    # Compute metrics
+    # Use peak-based metrics
+    peak_metrics = compute_peak_metrics(sources_true, peaks)
+    
+    # Compute boundary residual
     u_rec = linear.G @ q
     u_true = u_measured - np.mean(u_measured)
     u_rec = u_rec - np.mean(u_rec)
-    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    boundary_residual = np.linalg.norm(u_rec - u_true) / np.linalg.norm(u_true)
+    
+    # Convert clusters to list of dicts
+    clusters_data = [
+        {
+            'centroid': c.centroid,
+            'total_intensity': c.total_intensity,
+            'n_points': c.n_points,
+            'spread': c.spread
+        }
+        for c in clusters
+    ]
+    
+    # Convert peaks to list of dicts
+    peaks_data = [
+        {
+            'position': p.position,
+            'peak_intensity': p.peak_intensity,
+            'integrated_intensity': p.integrated_intensity,
+            'n_neighbors': p.n_neighbors
+        }
+        for p in peaks
+    ]
     
     return ComparisonResult(
         solver_name=f"BEM Numerical Linear ({method.upper()})",
         method_type='linear',
         forward_type='bem_numerical',
-        position_rmse=metrics['position_rmse'],
-        intensity_rmse=metrics['intensity_rmse'],
-        boundary_residual=metrics['boundary_residual'],
+        position_rmse=peak_metrics['position_rmse'],
+        intensity_rmse=peak_metrics['intensity_rmse'],
+        boundary_residual=boundary_residual,
         time_seconds=elapsed,
-        grid_positions=linear.interior_points,
-        grid_intensities=q
+        sources_recovered=[(p.position, p.integrated_intensity) for p in peaks],
+        grid_positions=linear.interior_points.copy(),
+        grid_intensities=q.copy(),
+        clusters=clusters_data,
+        peaks=peaks_data
     )
 
 
@@ -756,8 +1301,21 @@ def print_comparison_table(results: List[ComparisonResult]):
     print(f"Fastest solver: {best_time.solver_name} ({best_time.time_seconds:.2f}s)")
 
 
-def plot_comparison(results: List[ComparisonResult], sources_true, save_path=None):
-    """Create comparison visualization with intensity information."""
+def plot_comparison(results: List[ComparisonResult], sources_true, save_path=None,
+                    show_peaks=True, show_clusters=False):
+    """
+    Create comparison visualization with intensity information.
+    
+    Parameters
+    ----------
+    results : list of ComparisonResult
+    sources_true : list of ((x, y), q)
+    save_path : str, optional
+    show_peaks : bool
+        Show detected peaks (triangles) - better for smooth fields
+    show_clusters : bool
+        Show DBSCAN clusters (diamonds) - better for sparse fields
+    """
     n_results = len(results)
     n_cols = min(4, n_results)
     n_rows = (n_results + n_cols - 1) // n_cols
@@ -795,6 +1353,46 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
                                    vmin=-vmax, vmax=vmax,
                                    s=40, alpha=0.8, edgecolors='none')
                 plt.colorbar(scatter, ax=ax, shrink=0.6, label='q')
+            
+            # Plot detected peaks (triangles)
+            if show_peaks and result.peaks:
+                for peak in result.peaks:
+                    px, py = peak['position']
+                    int_q = peak['integrated_intensity']
+                    
+                    # Triangle marker for peak
+                    color = 'darkred' if int_q > 0 else 'darkblue'
+                    marker = '^' if int_q > 0 else 'v'
+                    size = 120 * abs(int_q) / max_true_intensity
+                    ax.scatter(px, py, c=color, s=max(size, 60), marker=marker, 
+                              edgecolors='white', linewidths=1.5, zorder=7)
+                    
+                    # Label with integrated intensity
+                    ax.annotate(f'{int_q:+.2f}', (px, py), 
+                               textcoords='offset points', xytext=(6, 6),
+                               fontsize=7, fontweight='bold', color=color,
+                               bbox=dict(boxstyle='round,pad=0.15', facecolor='white', 
+                                        alpha=0.8, edgecolor='none'))
+            
+            # Plot cluster centroids (diamonds) - optional
+            if show_clusters and result.clusters:
+                for cluster in result.clusters:
+                    cx, cy = cluster['centroid']
+                    total_q = cluster['total_intensity']
+                    spread = cluster['spread']
+                    
+                    # Diamond marker for cluster centroid
+                    color = 'green' if total_q > 0 else 'purple'
+                    size = 100 * abs(total_q) / max_true_intensity
+                    ax.scatter(cx, cy, c=color, s=max(size, 40), marker='D', 
+                              edgecolors='white', linewidths=1, zorder=6, alpha=0.7)
+                    
+                    # Show spread as dashed circle
+                    if spread > 0.05:
+                        circle = plt.Circle((cx, cy), spread, fill=False, 
+                                           color=color, linestyle='--', 
+                                           linewidth=1, alpha=0.4)
+                        ax.add_patch(circle)
         
         # For nonlinear solvers, show discrete markers with size ~ intensity
         elif result.sources_recovered:
@@ -821,12 +1419,18 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
                 ax.annotate(f'({q:+.1f})', (x, y), textcoords='offset points',
                            xytext=(-15, -12), fontsize=6, color='gray')
         
+        # Build title with detection info
+        title = f"{result.solver_name}\nPos RMSE={result.position_rmse:.3f}, "
+        title += f"Int RMSE={result.intensity_rmse:.3f}, t={result.time_seconds:.1f}s"
+        if result.peaks:
+            title += f"\n{len(result.peaks)} peaks"
+            if show_clusters and result.clusters:
+                title += f", {len(result.clusters)} clusters"
+        
         ax.set_xlim(-1.25, 1.25)
         ax.set_ylim(-1.25, 1.25)
         ax.set_aspect('equal')
-        ax.set_title(f"{result.solver_name}\nPos RMSE={result.position_rmse:.3f}, "
-                    f"Int RMSE={result.intensity_rmse:.3f}, t={result.time_seconds:.1f}s",
-                    fontsize=9)
+        ax.set_title(title, fontsize=9)
         ax.grid(True, alpha=0.3)
     
     # Hide empty subplots
@@ -835,8 +1439,10 @@ def plot_comparison(results: List[ComparisonResult], sources_true, save_path=Non
         axes[row, col].axis('off')
     
     # Add legend
-    fig.text(0.5, 0.02, 'True sources: ○ (size~|q|) | Nonlinear recovered: + (size~|q|, labeled) | Linear: color = intensity', 
-             ha='center', fontsize=9)
+    legend_text = 'True sources: ○ | Nonlinear: + | Linear peaks: ▲/▼ with integrated q'
+    if show_clusters:
+        legend_text += ' | Clusters: ◆'
+    fig.text(0.5, 0.02, legend_text, ha='center', fontsize=9)
     
     plt.tight_layout(rect=[0, 0.04, 1, 1])
     

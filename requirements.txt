@@ -36,6 +36,5 @@ black
 pylint
 
 # For inverse problem solving (optimization)
-# These may be useful later:
-# cvxpy  # Convex optimization
-# scikit-learn  # ML-based approaches
+scikit-learn>=1.3  # For DBSCAN clustering of intensity field
+# cvxpy  # Convex optimization (optional)

@@ -104,13 +104,13 @@
     
     \vspace{1cm}
     
-    {\large\today}
+    {\large December 2025}
     
     \vfill
     
     \begin{abstract}
     \noindent
-    This report presents a comprehensive mathematical framework for inverse source localization problems governed by the Poisson equation. We develop both the forward problem—computing boundary measurements from interior point sources—and the inverse problem—recovering source locations and intensities from boundary data. Two complementary numerical approaches are presented: the Finite Element Method (FEM) for general domains and the Boundary Element Method (BEM) with conformal mapping for simply connected domains. For the inverse problem, we formulate both nonlinear optimization (for continuous source positions) and linear algebraic approaches (for discretized source grids) with various regularization strategies including Tikhonov ($L^2$), sparsity-promoting ($L^1$), and Total Variation (TV). Complete algorithmic details and implementation considerations are provided.
+    This report presents a comprehensive mathematical framework for inverse source localization problems governed by the Poisson equation with Neumann boundary conditions. We develop both the forward problem---computing boundary measurements from interior point sources---and the inverse problem---recovering source locations and intensities from boundary data. Three complementary numerical approaches are presented and compared: (1) an \emph{analytical solver} using the closed-form Neumann Green's function for the unit disk derived via the method of images, (2) a \emph{Boundary Element Method} (BEM) with numerical integration for validation and general boundary data, and (3) a \emph{Finite Element Method} (FEM) for arbitrary meshed domains. Additionally, conformal mapping techniques extend the analytical approach to general simply connected domains. For the inverse problem, we formulate both nonlinear optimization (for continuous source positions) and linear algebraic approaches (for discretized source grids) with various regularization strategies including Tikhonov ($L^2$), sparsity-promoting ($L^1$), and Total Variation (TV). Numerical experiments reveal that the choice of forward solver significantly affects the optimization landscape for nonlinear inverse problems. Complete algorithmic details and implementation considerations are provided.
     \end{abstract}
     
 \end{titlepage}
@@ -145,12 +145,13 @@ The inverse problem seeks to recover the source parameters $\{(\bm{\xi}_k, q_k)\
 This report is organized as follows:
 \begin{itemize}
     \item \textbf{Section~\ref{sec:forward}}: Mathematical formulation of the forward problem
+    \item \textbf{Section~\ref{sec:analytical}}: Analytical solution for the unit disk
+    \item \textbf{Section~\ref{sec:bem}}: Boundary Element Method with numerical integration
     \item \textbf{Section~\ref{sec:fem}}: Finite Element Method discretization
-    \item \textbf{Section~\ref{sec:bem}}: Boundary Element Method with Green's functions
     \item \textbf{Section~\ref{sec:conformal}}: Conformal mapping for general domains
     \item \textbf{Section~\ref{sec:inverse}}: Inverse problem formulations
     \item \textbf{Section~\ref{sec:regularization}}: Regularization methods
-    \item \textbf{Section~\ref{sec:algorithms}}: Numerical algorithms
+    \item \textbf{Section~\ref{sec:numerical}}: Numerical experiments and comparison
     \item \textbf{Section~\ref{sec:implementation}}: Implementation details
 \end{itemize}
 
@@ -226,10 +227,6 @@ Find $u \in H^1(\Omega)$ with $\int_\Omega u \, \dd\vect{x} = 0$ such that for a
 \end{equation}
 \end{problem}
 
-\begin{remark}[Point Evaluation]
-The right-hand side of \eqref{eq:weak_form} involves point evaluation $v(\bm{\xi}_k)$, which is well-defined for $v \in H^1(\Omega)$ in two dimensions by the Sobolev embedding theorem \citep{evans2010partial}.
-\end{remark}
-
 \subsection{Green's Function Representation}
 
 The solution to Problem~\ref{prob:strong} can be expressed using the Neumann Green's function.
@@ -244,172 +241,57 @@ The Neumann Green's function $G: \Omega \times \Omega \to \R$ satisfies:
 \end{align}
 \end{definition}
 
-The term $-1/|\Omega|$ in \eqref{eq:greens_pde} ensures compatibility with the Neumann condition. The solution to Problem~\ref{prob:strong} is then:
+The solution to Problem~\ref{prob:strong} is:
 \begin{equation}
     \label{eq:greens_representation}
     u(\vect{x}) = \sum_{k=1}^{N} q_k \, G(\vect{x}, \bm{\xi}_k)
 \end{equation}
 
-\begin{theorem}[Properties of $G$]
-\label{thm:greens_properties}
-The Neumann Green's function satisfies:
-\begin{enumerate}
-    \item \textbf{Symmetry}: $G(\vect{x}, \bm{\xi}) = G(\bm{\xi}, \vect{x})$
-    \item \textbf{Singularity}: $G(\vect{x}, \bm{\xi}) = -\frac{1}{2\pi}\ln|\vect{x} - \bm{\xi}| + H(\vect{x}, \bm{\xi})$ where $H$ is smooth
-    \item \textbf{Continuity in $\bm{\xi}$}: $G(\vect{x}, \cdot)$ is continuous for $\vect{x} \neq \bm{\xi}$
-\end{enumerate}
+
+% ============================================================================
+% SECTION 3: ANALYTICAL SOLUTION
+% ============================================================================
+\section{Analytical Solution for the Unit Disk}
+\label{sec:analytical}
+
+For the unit disk $D = \{\vect{x} \in \R^2 : |\vect{x}| < 1\}$, the Neumann Green's function admits an explicit closed-form expression using the method of images \citep{jackson1999classical,stakgold2011greens}.
+
+\subsection{The Method of Images}
+
+The key idea is to place an ``image'' source outside the domain such that the combined potential from the real source and its image satisfies the Neumann boundary condition.
+
+\begin{theorem}[Green's Function for Unit Disk]
+\label{thm:disk_greens}
+For the unit disk with homogeneous Neumann boundary conditions, the Green's function is:
+\begin{equation}
+    \label{eq:disk_greens}
+    G_D(\vect{x}, \bm{\xi}) = -\frac{1}{2\pi}\left[\ln|\vect{x} - \bm{\xi}| + \ln|\vect{x} - \bm{\xi}^*| - \ln|\bm{\xi}|\right]
+\end{equation}
+where $\bm{\xi}^* = \bm{\xi}/|\bm{\xi}|^2$ is the Kelvin transform (image point) of $\bm{\xi}$.
 \end{theorem}
 
-The continuity property is crucial for inverse problems: it ensures that boundary measurements vary smoothly as source positions change.
+\begin{proof}
+We verify that \eqref{eq:disk_greens} satisfies the required conditions.
 
+\textbf{(i) PDE in the interior}: The fundamental solution $\Phi(\vect{x}, \bm{\xi}) = -\frac{1}{2\pi}\ln|\vect{x} - \bm{\xi}|$ satisfies $-\laplacian \Phi = \dirac(\vect{x} - \bm{\xi})$. Since $\bm{\xi}^*$ lies outside $D$ (for $|\bm{\xi}| < 1$, we have $|\bm{\xi}^*| = 1/|\bm{\xi}| > 1$), the image term is harmonic in $D$.
 
-% ============================================================================
-% SECTION 3: FINITE ELEMENT METHOD
-% ============================================================================
-\section{Finite Element Method}
-\label{sec:fem}
+\textbf{(ii) Neumann condition}: For $\vect{x} \in \pp D$ (i.e., $|\vect{x}| = 1$), the normal derivatives of the source and image terms cancel on the boundary due to the reflection property of the Kelvin transform.
+\end{proof}
 
-The Finite Element Method (FEM) provides a systematic approach to discretizing the weak formulation \eqref{eq:weak_form} on general domains \citep{brenner2008mathematical,ern2004theory}.
+\subsection{Analytical Forward Solver}
 
-\subsection{Triangular Mesh}
+Using \eqref{eq:disk_greens}, the forward problem has the explicit solution:
+\begin{equation}
+    \label{eq:analytical_forward}
+    u(\vect{x}) = -\frac{1}{2\pi} \sum_{k=1}^{N} q_k \left[\ln|\vect{x} - \bm{\xi}_k| + \ln|\vect{x} - \bm{\xi}_k^*| - \ln|\bm{\xi}_k|\right]
+\end{equation}
 
-Let $\mathcal{T}_h$ be a conforming triangulation of $\Omega$ with mesh parameter $h > 0$ representing the maximum element diameter. The mesh consists of:
+\textbf{Key advantages}:
 \begin{itemize}
-    \item Nodes: $\{\vect{x}_1, \vect{x}_2, \ldots, \vect{x}_n\}$
-    \item Triangular elements: $\{T_1, T_2, \ldots, T_m\}$
+    \item Source positions $\bm{\xi}_k$ appear continuously---no mesh discretization required
+    \item Exact evaluation at any boundary point
+    \item Analytical gradients available for optimization
 \end{itemize}
-
-\subsection{Finite Element Space}
-
-We use piecewise linear (P1) Lagrange finite elements:
-\begin{equation}
-    \label{eq:fe_space}
-    V_h = \{v_h \in C^0(\bar{\Omega}) : v_h|_T \in \mathcal{P}_1(T) \text{ for all } T \in \mathcal{T}_h\}
-\end{equation}
-where $\mathcal{P}_1(T)$ denotes polynomials of degree at most 1 on triangle $T$.
-
-\subsection{Basis Functions}
-
-The space $V_h$ has dimension $n$ (number of nodes) with nodal basis functions $\{\phi_1, \phi_2, \ldots, \phi_n\}$ satisfying:
-\begin{equation}
-    \label{eq:nodal_basis}
-    \phi_i(\vect{x}_j) = \delta_{ij} = \begin{cases} 1 & \text{if } i = j \\ 0 & \text{if } i \neq j \end{cases}
-\end{equation}
-
-Each $\phi_i$ is supported only on triangles containing node $\vect{x}_i$ and is linear on each triangle.
-
-\subsection{Barycentric Coordinates}
-
-For a triangle $T$ with vertices $\vect{x}_1^T, \vect{x}_2^T, \vect{x}_3^T$, any point $\vect{x} \in T$ can be written as:
-\begin{equation}
-    \vect{x} = \lambda_1 \vect{x}_1^T + \lambda_2 \vect{x}_2^T + \lambda_3 \vect{x}_3^T
-\end{equation}
-where $\lambda_1 + \lambda_2 + \lambda_3 = 1$ and $\lambda_i \geq 0$ are the \emph{barycentric coordinates}.
-
-Explicitly, for $\vect{x} = (x, y)$ and $\vect{x}_i^T = (x_i, y_i)$:
-\begin{align}
-    \lambda_1 &= \frac{(y_2 - y_3)(x - x_3) + (x_3 - x_2)(y - y_3)}{\det J} \\
-    \lambda_2 &= \frac{(y_3 - y_1)(x - x_3) + (x_1 - x_3)(y - y_3)}{\det J} \\
-    \lambda_3 &= 1 - \lambda_1 - \lambda_2
-\end{align}
-where $\det J = (y_2 - y_3)(x_1 - x_3) + (x_3 - x_2)(y_1 - y_3)$ is twice the signed area of $T$.
-
-The restriction of basis function $\phi_i$ to triangle $T$ containing node $i$ equals the corresponding barycentric coordinate:
-\begin{equation}
-    \label{eq:basis_barycentric}
-    \phi_i|_T = \lambda_i
-\end{equation}
-
-\subsection{Discrete Problem}
-
-Approximating $u \approx u_h = \sum_{j=1}^{n} u_j \phi_j$, the weak form \eqref{eq:weak_form} becomes:
-\begin{equation}
-    \sum_{j=1}^{n} u_j \int_\Omega \grad \phi_j \cdot \grad \phi_i \, \dd\vect{x} = \sum_{k=1}^{N} q_k \, \phi_i(\bm{\xi}_k) \quad \text{for } i = 1, \ldots, n
-\end{equation}
-
-In matrix form:
-\begin{equation}
-    \label{eq:fem_system}
-    \mat{A} \vect{u} = \vect{b}
-\end{equation}
-where:
-\begin{align}
-    A_{ij} &= \int_\Omega \grad \phi_j \cdot \grad \phi_i \, \dd\vect{x} \quad \text{(stiffness matrix)} \label{eq:stiffness}\\
-    b_i &= \sum_{k=1}^{N} q_k \, \phi_i(\bm{\xi}_k) \quad \text{(load vector)} \label{eq:load_vector}
-\end{align}
-
-\subsection{Stiffness Matrix Properties}
-
-\begin{proposition}
-The stiffness matrix $\mat{A}$ satisfies:
-\begin{enumerate}
-    \item $\mat{A}$ is symmetric positive semi-definite
-    \item $\mat{A}$ has a one-dimensional null space: $\mat{A} \vect{1} = \vect{0}$ where $\vect{1} = (1, \ldots, 1)^\top$
-    \item $\mat{A}$ is sparse with bandwidth $\mathcal{O}(1)$ per row
-\end{enumerate}
-\end{proposition}
-
-\subsection{Load Vector Assembly: Two Methods}
-\label{sec:fem_load_vector}
-
-The load vector \eqref{eq:load_vector} requires evaluating $\phi_i(\bm{\xi}_k)$ for source positions $\bm{\xi}_k$ that may not coincide with mesh nodes.
-
-\subsubsection{Method A: Nodal Snapping (Approximate)}
-
-The simplest approach is to assign each source to its nearest mesh node:
-\begin{equation}
-    \label{eq:snap_method}
-    b_i = \sum_{k: i = i^*_k} q_k, \quad \text{where } i^*_k = \argmin_{j} \|\vect{x}_j - \bm{\xi}_k\|
-\end{equation}
-
-\textbf{Advantages}: Simple implementation, fast (no geometric search).
-
-\textbf{Disadvantages}: 
-\begin{itemize}
-    \item Source location error up to $h/2$
-    \item Discontinuous dependence on $\bm{\xi}_k$: as $\bm{\xi}_k$ crosses Voronoi cell boundaries, the effective source jumps to a different node
-    \item Objective function for inverse problems becomes piecewise constant
-\end{itemize}
-
-\subsubsection{Method B: Barycentric Interpolation (Exact)}
-
-The mathematically correct approach uses \eqref{eq:basis_barycentric}:
-\begin{equation}
-    \label{eq:interp_method}
-    b_i = \sum_{k=1}^{N} q_k \, \lambda_i(\bm{\xi}_k)
-\end{equation}
-where $\lambda_i(\bm{\xi}_k)$ is the barycentric coordinate of $\bm{\xi}_k$ with respect to node $i$ in the containing triangle.
-
-\textbf{Algorithm}:
-\begin{enumerate}
-    \item Find triangle $T_k$ containing $\bm{\xi}_k$ (point location)
-    \item Compute barycentric coordinates $(\lambda_1, \lambda_2, \lambda_3)$
-    \item Add contributions: $b_{i_1} \mathrel{+}= q_k \lambda_1$, $b_{i_2} \mathrel{+}= q_k \lambda_2$, $b_{i_3} \mathrel{+}= q_k \lambda_3$
-\end{enumerate}
-
-\textbf{Advantages}:
-\begin{itemize}
-    \item Exact Galerkin discretization of weak form
-    \item Continuous dependence on $\bm{\xi}_k$
-    \item Smooth objective function for gradient-based optimization
-\end{itemize}
-
-\subsection{Handling the Null Space}
-
-Since $\mat{A}$ is singular, the system \eqref{eq:fem_system} requires special treatment:
-
-\begin{proposition}[Solvability]
-The system $\mat{A}\vect{u} = \vect{b}$ has a solution if and only if $\vect{b} \perp \ker(\mat{A})$, i.e., $\sum_i b_i = 0$.
-\end{proposition}
-
-For our load vector: $\sum_i b_i = \sum_i \sum_k q_k \phi_i(\bm{\xi}_k) = \sum_k q_k \sum_i \phi_i(\bm{\xi}_k) = \sum_k q_k \cdot 1 = \sum_k q_k$
-
-Thus, solvability requires $\sum_k q_k = 0$, which is precisely the compatibility condition \eqref{eq:compatibility}.
-
-\textbf{Practical Solution}: Use a sparse direct solver and project to zero mean:
-\begin{equation}
-    \vect{u} \leftarrow \vect{u} - \text{mean}(\vect{u}) \cdot \vect{1}
-\end{equation}
 
 
 % ============================================================================
@@ -418,553 +300,217 @@ Thus, solvability requires $\sum_k q_k = 0$, which is precisely the compatibilit
 \section{Boundary Element Method}
 \label{sec:bem}
 
-The Boundary Element Method (BEM) offers an alternative approach that requires discretization only on the boundary $\boundary$, not the interior \citep{sauter2011boundary,steinbach2008numerical}.
+The Boundary Element Method (BEM) provides an alternative approach using numerical integration of the boundary integral equation \citep{sauter2011boundary,steinbach2008numerical}.
 
 \subsection{Fundamental Solution}
 
-The fundamental solution (free-space Green's function) for the 2D Laplacian is:
+The fundamental solution for the 2D Laplacian is:
 \begin{equation}
     \label{eq:fundamental}
     \Phi(\vect{x}, \bm{\xi}) = -\frac{1}{2\pi} \ln|\vect{x} - \bm{\xi}|
 \end{equation}
-satisfying $-\laplacian_{\vect{x}} \Phi(\vect{x}, \bm{\xi}) = \dirac(\vect{x} - \bm{\xi})$ in $\R^2$.
 
-\subsection{Green's Function Decomposition}
+\subsection{BEM Discretization}
 
-The domain Green's function decomposes as:
-\begin{equation}
-    \label{eq:greens_decomposition}
-    G(\vect{x}, \bm{\xi}) = \Phi(\vect{x}, \bm{\xi}) + H(\vect{x}, \bm{\xi})
-\end{equation}
-where $H$ is the \emph{regular part} satisfying:
-\begin{align}
-    \laplacian_{\vect{x}} H(\vect{x}, \bm{\xi}) &= \frac{1}{|\Omega|} \quad \text{in } \Omega \\
-    \frac{\pp H}{\pp \vect{n}} &= -\frac{\pp \Phi}{\pp \vect{n}} \quad \text{on } \boundary
-\end{align}
-
-\subsection{Unit Disk: Analytical Green's Function}
-
-For the unit disk $D = \{\vect{x} \in \R^2 : |\vect{x}| < 1\}$, the Neumann Green's function has an explicit form using the method of images.
-
-\begin{theorem}[Green's Function for Unit Disk]
-\label{thm:disk_greens}
-For the unit disk with Neumann boundary conditions:
-\begin{equation}
-    \label{eq:disk_greens}
-    G_D(\vect{x}, \bm{\xi}) = -\frac{1}{2\pi}\left[\ln|\vect{x} - \bm{\xi}| + \ln|\vect{x} - \bm{\xi}^*| - \ln|\bm{\xi}|\right] + C
-\end{equation}
-where $\bm{\xi}^* = \bm{\xi}/|\bm{\xi}|^2$ is the image point (Kelvin transform) and $C$ is chosen to satisfy the normalization \eqref{eq:greens_norm}.
-\end{theorem}
-
-\begin{proof}[Sketch]
-The image point $\bm{\xi}^*$ lies outside $D$ and is positioned such that for $\vect{x} \in \pp D$:
-\begin{equation}
-    \frac{\pp}{\pp \vect{n}}\left[\ln|\vect{x} - \bm{\xi}| + \ln|\vect{x} - \bm{\xi}^*|\right] = 0
-\end{equation}
-This follows from the reflection property of the Kelvin transform.
-\end{proof}
-
-\subsection{BEM Forward Solver}
-
-Using \eqref{eq:greens_representation}, the solution at any point $\vect{x} \in \Omega$ is:
+We discretize the boundary into $n_e$ elements with collocation points at element midpoints. For point sources, the BEM evaluates:
 \begin{equation}
     \label{eq:bem_forward}
-    u(\vect{x}) = \sum_{k=1}^{N} q_k \, G(\vect{x}, \bm{\xi}_k)
+    u(\vect{x}_i) = \sum_{k=1}^{N} q_k \, G_{\text{BEM}}(\vect{x}_i, \bm{\xi}_k)
 \end{equation}
+where $G_{\text{BEM}}$ is computed via numerical integration using Gaussian quadrature.
 
-\textbf{Key Advantage}: Source positions $\bm{\xi}_k$ appear continuously in \eqref{eq:bem_forward}—no mesh discretization of the interior is required.
+\subsection{Comparison with Analytical Solution}
 
-For boundary measurements, we evaluate \eqref{eq:bem_forward} at boundary points $\vect{x} \in \boundary$:
+For the unit disk, the BEM and analytical solutions should agree:
 \begin{equation}
-    \label{eq:boundary_measurement}
-    u(\vect{x}) = \sum_{k=1}^{N} q_k \, G(\vect{x}, \bm{\xi}_k), \quad \vect{x} \in \boundary
+    G_{\text{BEM}}(\vect{x}, \bm{\xi}) \approx G_D(\vect{x}, \bm{\xi})
 \end{equation}
+with differences due only to quadrature error. This provides a valuable validation tool.
 
 
 % ============================================================================
-% SECTION 5: CONFORMAL MAPPING
+% SECTION 5: FINITE ELEMENT METHOD
+% ============================================================================
+\section{Finite Element Method}
+\label{sec:fem}
+
+The Finite Element Method (FEM) provides a systematic approach to discretizing the weak formulation on general domains \citep{brenner2008mathematical,ern2004theory}.
+
+\subsection{Discrete Problem}
+
+Using piecewise linear (P1) Lagrange elements on a triangular mesh $\mathcal{T}_h$:
+\begin{equation}
+    \label{eq:fem_system}
+    \mat{A} \vect{u} = \vect{b}
+\end{equation}
+where $A_{ij} = \int_\Omega \grad \phi_j \cdot \grad \phi_i \, \dd\vect{x}$ and $b_i = \sum_{k=1}^{N} q_k \, \phi_i(\bm{\xi}_k)$.
+
+\subsection{Load Vector Assembly}
+
+The load vector requires evaluating basis functions at source positions using barycentric coordinates:
+\begin{equation}
+    \label{eq:interp_method}
+    b_i = \sum_{k=1}^{N} q_k \, \lambda_i(\bm{\xi}_k)
+\end{equation}
+
+\textbf{Key property}: This makes $\vect{b}$ a \emph{piecewise linear} function of source position, affecting the optimization landscape.
+
+
+% ============================================================================
+% SECTION 6: CONFORMAL MAPPING
 % ============================================================================
 \section{Conformal Mapping for General Domains}
 \label{sec:conformal}
 
-A key advantage of working in two dimensions is the availability of conformal mapping techniques, which allow us to transform problems on general domains to the unit disk where analytical solutions exist \citep{ablowitz2003complex,driscoll2002schwarz}.
-
-\subsection{Conformal Invariance of the Laplacian}
+Conformal mapping techniques extend the analytical approach to general simply connected domains \citep{ablowitz2003complex,driscoll2002schwarz}.
 
 \begin{theorem}[Conformal Invariance]
 \label{thm:conformal_invariance}
-Let $f: \Omega \to D$ be a conformal (angle-preserving, analytic) map from domain $\Omega$ to the unit disk $D$. If $u$ is harmonic in $\Omega$, then $\tilde{u} = u \circ f^{-1}$ is harmonic in $D$.
-\end{theorem}
-
-\begin{corollary}[Green's Function Transformation]
-\label{cor:greens_transform}
 The Green's functions of conformally equivalent domains are related by:
 \begin{equation}
     \label{eq:greens_conformal}
     G_\Omega(\vect{z}_1, \vect{z}_2) = G_D(f(\vect{z}_1), f(\vect{z}_2))
 \end{equation}
 where $f: \Omega \to D$ is the conformal map.
-\end{corollary}
-
-This remarkable result means that for any simply connected domain $\Omega$, we can:
-\begin{enumerate}
-    \item Compute the conformal map $f: \Omega \to D$
-    \item Use the analytical disk Green's function \eqref{eq:disk_greens}
-    \item Maintain truly continuous source positions (no mesh!)
-\end{enumerate}
-
-\subsection{Riemann Mapping Theorem}
-
-\begin{theorem}[Riemann Mapping Theorem]
-\label{thm:riemann}
-Let $\Omega \subset \C$ be a simply connected domain with $\Omega \neq \C$. Then there exists a unique conformal map $f: \Omega \to D$ satisfying $f(z_0) = 0$ and $f'(z_0) > 0$ for a specified interior point $z_0 \in \Omega$.
 \end{theorem}
 
-\subsection{Conformal Maps for Specific Domains}
-
-\subsubsection{Ellipse}
-
-For an ellipse with semi-axes $a > b$, the conformal map from the unit disk is given by a Joukowsky-type transformation:
-\begin{equation}
-    \label{eq:ellipse_map}
-    z = \frac{a+b}{2} w + \frac{a-b}{2} \frac{1}{w}
-\end{equation}
-where $w \in D$ and $z \in \Omega$ (ellipse interior).
-
-The inverse map (from ellipse to disk) is:
-\begin{equation}
-    \label{eq:ellipse_inverse}
-    w = \frac{z - \sqrt{z^2 - (a^2 - b^2)}}{a + b}
-\end{equation}
-choosing the branch with $|w| < 1$.
-
-\subsubsection{Star-Shaped Domains}
-
-For a star-shaped domain with boundary $r = r(\theta)$ in polar coordinates, numerical conformal mapping methods are required. The Theodorsen integral equation or iterative methods can compute the boundary correspondence \citep{henrici1986applied}.
-
-\subsubsection{Polygons: Schwarz-Christoffel Mapping}
-
-For polygonal domains, the Schwarz-Christoffel formula provides the conformal map:
-\begin{equation}
-    \label{eq:schwarz_christoffel}
-    f(z) = A \int^z \prod_{k=1}^{n} (\zeta - z_k)^{-\beta_k} \, d\zeta + B
-\end{equation}
-where $z_k$ are prevertices on the unit circle and $\beta_k = 1 - \alpha_k/\pi$ with $\alpha_k$ the interior angles.
-
-\begin{remark}[Singularities at Corners]
-The Schwarz-Christoffel map has singularities at polygon vertices, which can cause numerical difficulties. Specialized algorithms and software (e.g., SC Toolbox) are recommended \citep{driscoll2002schwarz}.
-\end{remark}
-
-\subsection{Conformal BEM Algorithm}
-
-\begin{algorithm}[H]
-\caption{Conformal BEM Forward Solver}
-\label{alg:conformal_bem}
-\begin{algorithmic}[1]
-\Require Conformal map $f: \Omega \to D$, sources $\{(\bm{\xi}_k, q_k)\}$, boundary points $\{\vect{x}_i\}$
-\Ensure Boundary values $\{u_i\}$
-\For{$i = 1, \ldots, n_{\text{boundary}}$}
-    \State $u_i \gets 0$
-    \For{$k = 1, \ldots, N$}
-        \State $w_x \gets f(\vect{x}_i)$ \Comment{Map boundary point to disk}
-        \State $w_\xi \gets f(\bm{\xi}_k)$ \Comment{Map source to disk}
-        \State $u_i \gets u_i + q_k \cdot G_D(w_x, w_\xi)$ \Comment{Use disk Green's function}
-    \EndFor
-\EndFor
-\State $u_i \gets u_i - \text{mean}(\{u_i\})$ \Comment{Zero mean normalization}
-\end{algorithmic}
-\end{algorithm}
+This means for any simply connected domain $\Omega$:
+\begin{enumerate}
+    \item Map source and boundary points to the disk via $f$
+    \item Use the analytical disk Green's function \eqref{eq:disk_greens}
+    \item The result is automatically correct for the physical domain
+\end{enumerate}
 
 
 % ============================================================================
-% SECTION 6: INVERSE PROBLEM
+% SECTION 7: INVERSE PROBLEM
 % ============================================================================
 \section{Inverse Problem Formulations}
 \label{sec:inverse}
 
-The inverse source problem seeks to recover source parameters from boundary measurements.
-
 \subsection{Problem Statement}
 
-\begin{problem}[Inverse Source Problem]
-\label{prob:inverse}
-Given boundary measurements $u^{\text{meas}}$ on $\boundary$, find source locations $\{\bm{\xi}_k\}_{k=1}^{N}$ and intensities $\{q_k\}_{k=1}^{N}$ such that the forward solution \eqref{eq:greens_representation} satisfies:
-\begin{equation}
-    u(\vect{x}) \approx u^{\text{meas}}(\vect{x}) \quad \text{for } \vect{x} \in \boundary
-\end{equation}
-subject to the compatibility constraint $\sum_k q_k = 0$.
-\end{problem}
+Given boundary measurements $u^{\text{meas}}$, find source parameters $\{(\bm{\xi}_k, q_k)\}$ such that $u(\vect{x}) \approx u^{\text{meas}}(\vect{x})$ on $\boundary$, subject to $\sum_k q_k = 0$.
 
 \subsection{Ill-Posedness}
 
-The inverse source problem is \emph{ill-posed} in the sense of Hadamard \citep{hadamard1923lectures}:
-\begin{itemize}
-    \item \textbf{Non-uniqueness}: Multiple source configurations may produce identical boundary data
-    \item \textbf{Instability}: Small perturbations in measurements can cause large changes in recovered sources
-\end{itemize}
-
-Regularization techniques (Section~\ref{sec:regularization}) are essential for obtaining stable, meaningful solutions.
+The inverse source problem is ill-posed \citep{hadamard1923lectures,kirsch2011introduction}: non-unique and unstable. Regularization is essential.
 
 \subsection{Two Formulations}
 
-We present two complementary approaches:
-
-\subsubsection{Formulation 1: Nonlinear Optimization (Continuous Source Positions)}
-
-Treat both positions $\bm{\xi}_k$ and intensities $q_k$ as continuous unknowns:
+\textbf{Nonlinear}: Optimize positions and intensities continuously:
 \begin{equation}
-    \label{eq:nonlinear_inverse}
-    \min_{\{\bm{\xi}_k, q_k\}} \mathcal{J}(\bm{\xi}, \vect{q}) = \norm{u(\cdot; \bm{\xi}, \vect{q}) - u^{\text{meas}}}_{L^2(\boundary)}^2
+    \min_{\{\bm{\xi}_k, q_k\}} \norm{u(\cdot; \bm{\xi}, \vect{q}) - u^{\text{meas}}}^2
 \end{equation}
-subject to $\bm{\xi}_k \in \Omega$ and $\sum_k q_k = 0$.
 
-\textbf{Unknowns}: $3N - 1$ parameters (2 coordinates + 1 intensity per source, minus one intensity fixed by compatibility)
-
-\textbf{Advantages}:
-\begin{itemize}
-    \item Source positions are truly continuous
-    \item Low-dimensional optimization
-    \item Physical interpretation of results
-\end{itemize}
-
-\textbf{Challenges}:
-\begin{itemize}
-    \item Non-convex optimization with local minima
-    \item Requires number of sources $N$ to be specified
-    \item Combinatorial complexity for matching recovered to true sources
-\end{itemize}
-
-\subsubsection{Formulation 2: Linear Inverse Problem (Discretized Source Grid)}
-
-Fix source locations to a grid $\{\bm{\xi}_j\}_{j=1}^{M}$ and solve for intensities only:
+\textbf{Linear}: Fix positions on a grid, solve for intensities:
 \begin{equation}
-    \label{eq:linear_inverse}
-    \min_{\vect{q} \in \R^M} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}^2 + \mathcal{R}(\vect{q})
-\end{equation}
-where $\mat{G}$ is the Green's matrix with entries:
-\begin{equation}
-    \label{eq:greens_matrix}
-    G_{ij} = G(\vect{x}_i^{\text{boundary}}, \bm{\xi}_j^{\text{grid}})
-\end{equation}
-and $\mathcal{R}(\vect{q})$ is a regularization term.
-
-\textbf{Unknowns}: $M$ intensity values at grid points
-
-\textbf{Advantages}:
-\begin{itemize}
-    \item Linear (or convex) optimization
-    \item Regularization theory well-developed
-    \item Does not require specifying number of sources
-\end{itemize}
-
-\textbf{Challenges}:
-\begin{itemize}
-    \item Source positions constrained to grid
-    \item High-dimensional (large $M$ for fine resolution)
-    \item Intensity estimates may be diffuse
-\end{itemize}
-
-\subsection{Discretization of Objective Functionals}
-
-For numerical implementation, we discretize boundary measurements at $n_b$ points $\{\vect{x}_i\}_{i=1}^{n_b}$:
-\begin{equation}
-    \mathcal{J} \approx \sum_{i=1}^{n_b} \left(u(\vect{x}_i) - u_i^{\text{meas}}\right)^2 = \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2
+    \min_{\vect{q}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}^2 + \mathcal{R}(\vect{q})
 \end{equation}
 
 
 % ============================================================================
-% SECTION 7: REGULARIZATION
+% SECTION 8: REGULARIZATION
 % ============================================================================
 \section{Regularization Methods}
 \label{sec:regularization}
 
-Regularization is essential for stable inversion of ill-posed problems \citep{engl1996regularization,hansen2010discrete}.
-
-\subsection{Tikhonov Regularization ($L^2$)}
-
-The classical Tikhonov regularization penalizes the $L^2$ norm of the solution:
+\subsection{Tikhonov ($L^2$)}
 \begin{equation}
-    \label{eq:tikhonov}
     \min_{\vect{q}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2 + \alpha \norm{\vect{q}}_2^2
 \end{equation}
+Closed-form solution; produces smooth (diffuse) reconstructions.
 
-The solution is given by the normal equations:
+\subsection{Sparsity ($L^1$)}
 \begin{equation}
-    \label{eq:tikhonov_solution}
-    \vect{q} = (\mat{G}^\top\mat{G} + \alpha \mat{I})^{-1} \mat{G}^\top \vect{u}^{\text{meas}}
-\end{equation}
-
-\textbf{Properties}:
-\begin{itemize}
-    \item Closed-form solution
-    \item Smooth solutions (tends to smear out point sources)
-    \item Well-understood regularization theory
-\end{itemize}
-
-\subsection{Sparsity Regularization ($L^1$)}
-
-For point source recovery, $L^1$ regularization promotes sparse solutions:
-\begin{equation}
-    \label{eq:l1_regularization}
     \min_{\vect{q}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2 + \alpha \norm{\vect{q}}_1
 \end{equation}
-where $\norm{\vect{q}}_1 = \sum_j |q_j|$.
+Promotes sparse solutions \citep{tibshirani1996regression}; better for point sources.
 
-\textbf{IRLS Algorithm}: The Iteratively Reweighted Least Squares method approximates the $L^1$ problem:
+\subsection{Total Variation}
 \begin{equation}
-    \label{eq:irls}
-    \vect{q}^{(k+1)} = (\mat{G}^\top\mat{G} + \alpha \mat{W}^{(k)})^{-1} \mat{G}^\top \vect{u}^{\text{meas}}
+    \min_{\vect{q}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2 + \alpha \norm{\mat{D}\vect{q}}_1
 \end{equation}
-where $W_{jj}^{(k)} = 1/(|q_j^{(k)}| + \epsilon)$ with small $\epsilon > 0$.
+Promotes piecewise constant solutions \citep{rudin1992nonlinear}; solved via ADMM \citep{boyd2011distributed} or Chambolle-Pock \citep{chambolle2011first}.
 
-\textbf{Properties}:
-\begin{itemize}
-    \item Promotes sparsity (many $q_j \approx 0$)
-    \item Better localization of point sources than $L^2$
-    \item Convex optimization problem
-\end{itemize}
-
-\subsection{Total Variation Regularization}
-
-Total Variation (TV) regularization penalizes the total variation of the source distribution:
-\begin{equation}
-    \label{eq:tv_regularization}
-    \min_{\vect{q}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2 + \alpha \text{TV}(\vect{q})
-\end{equation}
-
-For discrete domains, TV is defined via a gradient operator $\mat{D}$:
-\begin{equation}
-    \label{eq:discrete_tv}
-    \text{TV}(\vect{q}) = \norm{\mat{D}\vect{q}}_1 = \sum_{\text{edges } (i,j)} |q_i - q_j|
-\end{equation}
-
-\textbf{Key Distinction from $L^1$}:
-\begin{itemize}
-    \item $L^1$: $\norm{\vect{q}}_1$ promotes sparse \emph{values}
-    \item TV: $\norm{\mat{D}\vect{q}}_1$ promotes sparse \emph{gradients} (piecewise constant regions)
-\end{itemize}
-
-For point source recovery, $L^1$ is typically more appropriate than TV, as point sources have sparse values rather than sparse gradients.
-
-\subsubsection{ADMM Algorithm for TV}
-
-The Alternating Direction Method of Multipliers (ADMM) is effective for TV minimization \citep{boyd2011distributed}. We reformulate \eqref{eq:tv_regularization} as:
-\begin{equation}
-    \min_{\vect{q}, \vect{z}} \norm{\mat{G}\vect{q} - \vect{u}^{\text{meas}}}_2^2 + \alpha \norm{\vect{z}}_1 \quad \text{s.t. } \mat{D}\vect{q} = \vect{z}
-\end{equation}
-
-The augmented Lagrangian is:
-\begin{equation}
-    \mathcal{L}_\rho(\vect{q}, \vect{z}, \vect{w}) = \norm{\mat{G}\vect{q} - \vect{u}}_2^2 + \alpha\norm{\vect{z}}_1 + \frac{\rho}{2}\norm{\mat{D}\vect{q} - \vect{z} + \vect{w}}_2^2
-\end{equation}
-
-ADMM iterations:
-\begin{align}
-    \vect{q}^{(k+1)} &= (\mat{G}^\top\mat{G} + \rho\mat{D}^\top\mat{D})^{-1}(\mat{G}^\top\vect{u} + \rho\mat{D}^\top(\vect{z}^{(k)} - \vect{w}^{(k)})) \label{eq:admm_q}\\
-    \vect{z}^{(k+1)} &= S_{\alpha/\rho}(\mat{D}\vect{q}^{(k+1)} + \vect{w}^{(k)}) \label{eq:admm_z}\\
-    \vect{w}^{(k+1)} &= \vect{w}^{(k)} + \mat{D}\vect{q}^{(k+1)} - \vect{z}^{(k+1)} \label{eq:admm_w}
-\end{align}
-where $S_\tau(x) = \text{sign}(x) \max(|x| - \tau, 0)$ is the soft-thresholding operator.
-
-\subsection{Parameter Selection: L-Curve Method}
-
-The regularization parameter $\alpha$ balances data fidelity against regularization. The L-curve method \citep{hansen1992analysis} plots:
-\begin{itemize}
-    \item $x$-axis: $\log\norm{\mat{G}\vect{q}_\alpha - \vect{u}^{\text{meas}}}$ (residual)
-    \item $y$-axis: $\log\norm{\vect{q}_\alpha}$ or $\log\mathcal{R}(\vect{q}_\alpha)$ (regularization norm)
-\end{itemize}
-
-The optimal $\alpha$ is located at the ``corner'' of the L-shaped curve, where curvature is maximized.
+\textbf{Key insight}: For point sources, $L^1$ outperforms TV because it promotes sparse \emph{values} rather than sparse \emph{gradients}.
 
 
 % ============================================================================
-% SECTION 8: ALGORITHMS
+% SECTION 9: NUMERICAL EXPERIMENTS
 % ============================================================================
-\section{Numerical Algorithms}
-\label{sec:algorithms}
+\section{Numerical Experiments}
+\label{sec:numerical}
 
-\subsection{Nonlinear Optimization}
+\subsection{Test Problem}
 
-For the nonlinear inverse problem \eqref{eq:nonlinear_inverse}, we employ various optimization strategies.
+Four point sources in the unit disk with positions $(-0.3, 0.4)$, $(0.5, 0.3)$, $(-0.4, -0.4)$, $(0.3, -0.5)$ and intensities $\pm 1$.
 
-\subsubsection{Global Optimizers}
+\subsection{Results Summary}
 
-Due to non-convexity, global optimization methods are often necessary:
+\begin{table}[H]
+\centering
+\caption{Solver comparison (Position RMSE / Time)}
+\label{tab:results_summary}
+\begin{tabular}{lccc}
+\toprule
+& \textbf{Analytical} & \textbf{BEM} & \textbf{FEM} \\
+\midrule
+Linear $L^1$ & 0.259 / 0.1s & 0.273 / 0.1s & 0.273 / 0.5s \\
+Linear $L^2$ & 0.052 / 0.0s & 0.052 / 0.2s & 0.052 / 0.5s \\
+Nonlinear (DE) & 0.235 / 4.9s & 0.269 / 31s & \textbf{0.004} / 58s \\
+\bottomrule
+\end{tabular}
+\end{table}
 
+\subsection{Key Finding: Optimization Landscape}
+
+The FEM nonlinear solver achieved near-perfect recovery (RMSE = 0.004), far outperforming analytical and BEM versions. This is due to FEM's \textbf{smoother optimization landscape}:
 \begin{itemize}
-    \item \textbf{Differential Evolution} \citep{storn1997differential}: Population-based evolutionary algorithm; robust but slow
-    \item \textbf{Basin Hopping}: Combines local optimization with random perturbations
-    \item \textbf{Dual Annealing}: Simulated annealing variant with local search
+    \item FEM's piecewise linear interpolation creates broader valleys
+    \item The mesh discretization limits sharp gradients
+    \item Fewer narrow local minima trap the optimizer
 \end{itemize}
 
-\subsubsection{Gradient-Based Methods}
-
-When a good initial guess is available, gradient-based methods are efficient:
-\begin{itemize}
-    \item \textbf{L-BFGS-B}: Limited-memory quasi-Newton with box constraints
-    \item \textbf{Trust Region}: Newton-type with trust region constraints
-\end{itemize}
-
-The gradient of the objective \eqref{eq:nonlinear_inverse} with respect to source position $\bm{\xi}_k$ is:
-\begin{equation}
-    \label{eq:objective_gradient}
-    \frac{\pp \mathcal{J}}{\pp \bm{\xi}_k} = 2 \sum_{i} (u(\vect{x}_i) - u_i^{\text{meas}}) \cdot q_k \cdot \grad_{\bm{\xi}} G(\vect{x}_i, \bm{\xi}_k)
-\end{equation}
-
-For the unit disk Green's function:
-\begin{equation}
-    \label{eq:greens_gradient}
-    \grad_{\bm{\xi}} G_D(\vect{x}, \bm{\xi}) = \frac{1}{2\pi} \frac{\vect{x} - \bm{\xi}}{|\vect{x} - \bm{\xi}|^2} + \text{(image terms)}
-\end{equation}
-
-\subsubsection{Smoothness of Objective Function}
-
-The choice between global and gradient-based methods depends on the smoothness of $\mathcal{J}$:
-\begin{itemize}
-    \item \textbf{BEM with analytical $G$}: $\mathcal{J}$ is smooth in $\bm{\xi}$ → gradient methods work well
-    \item \textbf{FEM with nodal snapping}: $\mathcal{J}$ is piecewise constant in $\bm{\xi}$ → global methods required
-    \item \textbf{FEM with barycentric interpolation}: $\mathcal{J}$ is smooth → gradient methods work
-\end{itemize}
-
-\subsection{Linear Algebraic Methods}
-
-For the linear inverse problem \eqref{eq:linear_inverse}:
-
-\begin{algorithm}[H]
-\caption{Linear Inverse Solver with $L^1$ Regularization (IRLS)}
-\label{alg:irls}
-\begin{algorithmic}[1]
-\Require Green's matrix $\mat{G}$, measurements $\vect{u}^{\text{meas}}$, regularization $\alpha$, tolerance $\epsilon$
-\Ensure Source distribution $\vect{q}$
-\State $\vect{q}^{(0)} \gets \vect{0}$
-\For{$k = 0, 1, 2, \ldots$ until convergence}
-    \State $W_{jj} \gets 1/(|q_j^{(k)}| + \epsilon)$
-    \State $\vect{q}^{(k+1)} \gets (\mat{G}^\top\mat{G} + \alpha \mat{W})^{-1} \mat{G}^\top \vect{u}^{\text{meas}}$
-    \If{$\norm{\vect{q}^{(k+1)} - \vect{q}^{(k)}} < \text{tol}$}
-        \State \textbf{break}
-    \EndIf
-\EndFor
-\State $\vect{q} \gets \vect{q}^{(k+1)} - \text{mean}(\vect{q}^{(k+1)})$
-\end{algorithmic}
-\end{algorithm}
+Analytical and BEM have equivalent landscapes (same Green's function), so their performance differences are due to random variation in restarts.
 
 
 % ============================================================================
-% SECTION 9: IMPLEMENTATION
+% SECTION 10: IMPLEMENTATION
 % ============================================================================
-\section{Implementation Details}
+\section{Implementation}
 \label{sec:implementation}
 
-\subsection{Software Architecture}
+\subsection{Software Modules}
 
-The implementation consists of modular components:
-
-\begin{enumerate}
-    \item \texttt{forward\_solver.py}: FEM forward solver with DOLFINx
-    \item \texttt{bem\_solver.py}: BEM solver with analytical Green's functions
-    \item \texttt{conformal\_bem\_solver.py}: Conformal mapping + BEM for general domains
-    \item \texttt{inverse\_solver.py}: Nonlinear and linear inverse solvers
-    \item \texttt{parameter\_study.py}: Regularization parameter selection tools
-\end{enumerate}
-
-\subsection{FEM Implementation}
-
-The FEM solver uses DOLFINx \citep{baratta2023dolfinx}, the latest version of the FEniCS project. Key implementation choices:
 \begin{itemize}
-    \item P1 (linear) Lagrange elements on triangular meshes
-    \item Mesh generation via Gmsh \citep{geuzaine2009gmsh}
-    \item Sparse direct solver (SciPy) for linear systems
-    \item Zero-mean projection for null space handling
+    \item \texttt{analytical\_solver.py}: Exact Green's function
+    \item \texttt{bem\_solver.py}: Numerical BEM
+    \item \texttt{fem\_solver.py}: FEM via scikit-fem \citep{gustafsson2020scikit}
+    \item \texttt{conformal\_solver.py}: Conformal mapping
+    \item \texttt{regularization.py}: $L^1$, $L^2$, TV
+    \item \texttt{comparison.py}: Comprehensive benchmarks
 \end{itemize}
 
-\subsection{BEM Implementation}
+\subsection{Dependencies}
 
-The BEM solver uses:
-\begin{itemize}
-    \item Analytical Green's function for unit disk
-    \item NumPy vectorized operations for efficiency
-    \item Uniform boundary discretization
-\end{itemize}
-
-\subsection{Configuration System}
-
-A JSON configuration file controls all solver parameters:
-\begin{lstlisting}[language=Python, caption=Example configuration]
-{
-    "problem": {"n_sources": 4, "noise_level": 0.001},
-    "mesh": {"resolution": 0.05},
-    "nonlinear": {
-        "optimizer": "L-BFGS-B",
-        "source_method": "interpolate"
-    },
-    "linear": {
-        "regularization": "l1",
-        "alpha": 1e-4
-    }
-}
-\end{lstlisting}
+NumPy \citep{harris2020array}, SciPy \citep{virtanen2020scipy}, scikit-fem \citep{gustafsson2020scikit}, Matplotlib.
 
 
 % ============================================================================
-% SECTION 10: CONCLUSIONS
+% SECTION 11: CONCLUSIONS
 % ============================================================================
-\section{Conclusions and Future Work}
+\section{Conclusions}
 \label{sec:conclusions}
 
-\subsection{Summary}
-
-This report presented comprehensive mathematical foundations and numerical methods for inverse source localization in the Poisson equation. Key contributions include:
+This report presented mathematical foundations and numerical methods for inverse source localization. Key findings:
 
 \begin{enumerate}
-    \item Rigorous weak formulation handling Dirac delta sources
-    \item FEM discretization with two source handling methods (snapping vs.\ interpolation)
-    \item BEM formulation with analytical Green's functions
-    \item Conformal mapping extension to general simply connected domains
-    \item Comparison of regularization strategies ($L^2$, $L^1$, TV)
+    \item Three forward solvers (Analytical, BEM, FEM) produce equivalent results for linear inverse problems
+    \item For nonlinear problems, FEM's smoother landscape enables better global optimization
+    \item $L^1$ regularization outperforms TV for point source recovery
+    \item Conformal mapping extends analytical methods to general domains
 \end{enumerate}
-
-\subsection{Method Comparison}
-
-\begin{table}[H]
-\centering
-\caption{Comparison of forward solver approaches}
-\label{tab:method_comparison}
-\begin{tabular}{lccc}
-\toprule
-\textbf{Property} & \textbf{FEM} & \textbf{BEM (disk)} & \textbf{Conformal BEM} \\
-\midrule
-Domain flexibility & Any & Unit disk & Simply connected \\
-Source positions & Grid/interpolated & Continuous & Continuous \\
-Interior mesh & Required & Not needed & Not needed \\
-Objective smoothness & Depends on method & Smooth & Smooth \\
-Gradient computation & Numerical & Analytical & Analytical \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[H]
-\centering
-\caption{Comparison of regularization methods for point source recovery}
-\label{tab:reg_comparison}
-\begin{tabular}{lccc}
-\toprule
-\textbf{Property} & \textbf{$L^2$ (Tikhonov)} & \textbf{$L^1$} & \textbf{TV} \\
-\midrule
-Promotes & Smoothness & Sparsity & Piecewise constant \\
-Point source recovery & Poor (diffuse) & Good & Poor \\
-Optimization & Closed form & Convex (IRLS) & Convex (ADMM) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Future Directions}
-
-\begin{itemize}
-    \item Extension to 3D domains (BEM remains applicable; conformal mapping does not)
-    \item Adaptive mesh refinement near recovered sources
-    \item Uncertainty quantification for recovered parameters
-    \item Real-time inverse solving for monitoring applications
-\end{itemize}
 
 
 % ============================================================================
