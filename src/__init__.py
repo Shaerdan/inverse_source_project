@@ -60,7 +60,7 @@ License
 MIT License
 """
 
-__version__ = "2.0.0"
+__version__ = "7.30.0"  # Fixed source generation: r in [0.5, 0.85] for better conditioning, well-separated test sources
 __author__ = "Serdan"
 
 # =============================================================================
@@ -107,6 +107,10 @@ from .bem_solver import (
 from .mesh import (
     create_disk_mesh,
     get_source_grid,
+    create_ellipse_mesh,
+    get_ellipse_source_grid,
+    create_polygon_mesh,
+    get_polygon_source_grid,
 )
 
 # =============================================================================
@@ -128,22 +132,21 @@ from .fem_solver import (
 # CONFORMAL MAPPING SOLVER (General domains)
 # =============================================================================
 from .conformal_solver import (
-    # Maps
+    # Base class
     ConformalMap,
+    # Specific maps
     DiskMap,
     EllipseMap,
-    StarShapedMap,
+    RectangleMap,
+    PolygonMap,
+    NumericalConformalMap,
     # Solvers
     ConformalForwardSolver,
     ConformalLinearInverseSolver,
     ConformalNonlinearInverseSolver,
-    # Convenience
-    create_ellipse_solver,
-    create_star_solver,
-    # Backward-compatible aliases
-    ConformalBEMSolver,  # -> ConformalForwardSolver
-    ConformalNonlinearInverse,  # -> ConformalNonlinearInverseSolver
-    ConformalLinearInverse,  # -> ConformalLinearInverseSolver
+    # Factory functions
+    create_conformal_map,
+    solve_forward_conformal,
 )
 
 # =============================================================================
@@ -202,13 +205,45 @@ from .parameter_study import (
 )
 
 # =============================================================================
+# PARAMETER SELECTION (L-curve, discrepancy principle)
+# =============================================================================
+from .parameter_selection import (
+    estimate_alpha,
+    find_lcurve_corner,
+    find_discrepancy_alpha,
+    parameter_sweep as param_sweep_lcurve,  # Renamed to avoid conflict
+    run_full_comparison,
+    plot_parameter_sweep,
+    plot_solutions_comparison,
+    ParameterSweepResult,
+    # New proper metrics (not threshold-dependent)
+    localization_score,
+    sparsity_ratio,
+    intensity_weighted_centroid,
+)
+
+# =============================================================================
 # COMPARISON (all solver types)
 # =============================================================================
 from .comparison import (
     compare_all_solvers,
+    compare_all_solvers_general,
+    run_domain_comparison,
+    create_domain_sources,
     print_comparison_table,
     plot_comparison,
     ComparisonResult,
+    # Individual solver runners
+    run_bem_linear,
+    run_bem_nonlinear,
+    run_fem_linear,
+    run_fem_nonlinear,
+    run_conformal_linear,
+    run_conformal_nonlinear,
+    run_fem_polygon_linear,
+    run_fem_polygon_nonlinear,
+    run_fem_ellipse_linear,
+    run_fem_ellipse_nonlinear,
 )
 
 # =============================================================================
@@ -221,6 +256,7 @@ from . import conformal_solver
 from . import fem_solver
 from . import regularization
 from . import parameter_study
+from . import parameter_selection
 from . import config
 from . import utils
 from . import comparison
@@ -253,6 +289,10 @@ __all__ = [
     # === MESH ===
     'create_disk_mesh',
     'get_source_grid',
+    'create_ellipse_mesh',
+    'get_ellipse_source_grid',
+    'create_polygon_mesh',
+    'get_polygon_source_grid',
     
     # === FEM SOLVER ===
     'FEMForwardSolver',
@@ -308,9 +348,22 @@ __all__ = [
     
     # === COMPARISON ===
     'compare_all_solvers',
+    'compare_all_solvers_general',
+    'run_domain_comparison',
+    'create_domain_sources',
     'print_comparison_table',
     'plot_comparison',
     'ComparisonResult',
+    'run_bem_linear',
+    'run_bem_nonlinear',
+    'run_fem_linear',
+    'run_fem_nonlinear',
+    'run_conformal_linear',
+    'run_conformal_nonlinear',
+    'run_fem_polygon_linear',
+    'run_fem_polygon_nonlinear',
+    'run_fem_ellipse_linear',
+    'run_fem_ellipse_nonlinear',
     
     # === MODULES ===
     'mesh',
@@ -332,3 +385,56 @@ __all__ = [
     'ConformalNonlinearInverse',  # Use ConformalNonlinearInverseSolver
     'ConformalLinearInverse',  # Use ConformalLinearInverseSolver
 ]
+
+# Mesh convergence study
+from .mesh_convergence import (
+    run_forward_mesh_convergence,
+    run_inverse_source_grid_convergence,
+    run_full_convergence_study,
+    ConvergenceStudy,
+    ConvergenceResult
+)
+
+
+# Calibration module
+from .calibration import (
+    calibrate_domain,
+    calibrate_all_domains,
+    load_calibration_config,
+    save_calibration_config,
+    get_domain_params,
+    plot_calibration_results,
+    DomainCalibration,
+    CalibrationConfig
+)
+
+# Reference solution generation
+from .reference_solution import (
+    get_reference_solution,
+    generate_measurement_data,
+    verify_fem_convergence
+)
+
+# Experiment tracking
+from .experiment_tracker import (
+    ExperimentTracker,
+    CalibrationTracker,
+    ExperimentDatabase,
+    ExperimentConfig,
+    ExperimentMetrics,
+    get_timestamp,
+    get_short_hash,
+    list_experiments,
+    get_experiment_details
+)
+
+# Mesh saving functions
+from .mesh import (
+    save_mesh_npz,
+    load_mesh_npz,
+    save_mesh_msh,
+    save_source_grid_npz,
+    load_source_grid_npz,
+    save_source_grid_msh,
+    save_meshes
+)

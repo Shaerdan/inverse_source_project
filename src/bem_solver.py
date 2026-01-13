@@ -479,7 +479,7 @@ class BEMNonlinearInverseSolver:
         if init_from == 'random' or seed > 0:
             np.random.seed(42 + seed)
             for i in range(n):
-                r = 0.3 + 0.4 * np.random.rand()
+                r = 0.5 + 0.35 * np.random.rand()  # r in [0.5, 0.85]
                 angle = 2 * np.pi * np.random.rand()
                 x0.extend([r * np.cos(angle), r * np.sin(angle)])
                 if i < n - 1:
@@ -605,7 +605,7 @@ def validate_against_analytical(n_sources: int = 4, n_boundary: int = 64,
     sources = []
     total_q = 0
     for i in range(n_sources - 1):
-        r = 0.2 + 0.5 * np.random.rand()
+        r = 0.5 + 0.35 * np.random.rand()  # r in [0.5, 0.85]
         theta = 2 * np.pi * np.random.rand()
         q = np.random.randn()
         sources.append(((r * np.cos(theta), r * np.sin(theta)), q))

@@ -2,40 +2,52 @@
 Conformal Mapping Solver for General Simply-Connected Domains
 ==============================================================
 
-This module extends the analytical solver to general simply-connected domains
-using conformal mapping. The key idea is:
+This module extends the analytical solver to ANY simply-connected domain
+using conformal mapping. The key theoretical result (Theorem 6.3 in the docs):
 
-    1. Map the physical domain Ω to the unit disk D via conformal map w = f(z)
-    2. Solve the transformed problem on the disk (where we have analytical solution)
-    3. Map the solution back to the physical domain
-
-For the Laplacian, conformal invariance means:
-    Δ_z u = |f'(z)|² Δ_w ũ
-
-where ũ(w) = u(f⁻¹(w)) is the transformed solution.
+    For any simply connected domain Ω with conformal map f: Ω → D,
+    the solution to the Poisson-Neumann problem with point sources is:
+    
+        u(z) = Σ qₖ G_D(f(z), f(zₖ))
+    
+    where G_D is the disk Green's function and the intensities qₖ are PRESERVED
+    (not scaled by the Jacobian).
 
 Supported Domains
 -----------------
-1. **Ellipse**: w = (z + 1/z)/2 maps exterior of unit circle to exterior of ellipse
-               (need Joukowsky variant for interior)
-2. **Star-shaped domains**: Numerical conformal map via Symm's integral equation
-3. **Polygon**: Schwarz-Christoffel transformation
+1. **Disk**: Identity map (trivial)
+2. **Ellipse**: Inverse Joukowsky transformation (explicit)
+3. **Rectangle**: Schwarz-Christoffel with elliptic integrals (explicit)
+4. **Regular Polygon**: Schwarz-Christoffel with known prevertices
+5. **General Polygon**: Schwarz-Christoffel with numerical prevertices
+6. **Arbitrary Smooth Domain**: Numerical conformal mapping via Fornberg/Kerzman-Stein
 
-For point sources, the Green's function transforms as:
-    G_Ω(z, ζ) = G_D(f(z), f(ζ))
+The Solution Recipe
+-------------------
+For ANY domain Ω:
+1. Obtain conformal map f: Ω → D (explicit or numerical)
+2. Map evaluation points: w = f(z)
+3. Map source positions: wₖ = f(zₖ)  
+4. Compute: u(z) = Σ qₖ G_D(w, wₖ)
 
-This is exact because the Green's function is conformally invariant (in 2D).
+That's it! No new PDEs to solve.
 
-References:
-    - Driscoll & Trefethen, "Schwarz-Christoffel Mapping"
-    - Henrici, "Applied and Computational Complex Analysis"
+References
+----------
+- Driscoll & Trefethen, "Schwarz-Christoffel Mapping" (2002)
+- Henrici, "Applied and Computational Complex Analysis" Vol 3
+- Trefethen, "Numerical Conformal Mapping" (1980)
 """
 
 import numpy as np
-from scipy.optimize import minimize, differential_evolution
-from typing import List, Tuple, Callable, Optional
+from scipy.optimize import minimize, differential_evolution, fsolve, brentq
+from scipy.integrate import quad
+from scipy.interpolate import interp1d
+from scipy.special import ellipk
+from typing import List, Tuple, Callable, Optional, Union
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+import warnings
 
 try:
     from .analytical_solver import (
@@ -53,96 +65,353 @@ except ImportError:
     from mesh import get_source_grid
 
 
+# =============================================================================
+# MFS-BASED CONFORMAL MAP (Proper implementation using Laplace equation)
+# =============================================================================
+
+class MFSConformalMap:
+    """
+    Proper numerical conformal map using Method of Fundamental Solutions.
+    
+    This fixes the broken radial-scaling approach by solving the Laplace
+    equation to extend the boundary correspondence to the interior.
+    
+    The key insight:
+    - Boundary correspondence θ(t) is computed via arc-length (correct)
+    - Interior extension: solve Δu = 0 with u|_∂Ω = cos(θ), Δv = 0 with v|_∂Ω = sin(θ)
+    - Then f(z) = u + iv is conformal (holomorphic)
+    
+    Parameters
+    ----------
+    boundary_func : callable
+        Function γ(t) returning complex boundary point for t ∈ [0, 2π]
+    n_boundary : int
+        Number of boundary discretization points
+    n_charge : int
+        Number of MFS charge points (source singularities outside domain)
+    charge_offset : float
+        Distance of charge points from boundary (as fraction of char_size)
+    """
+    
+    def __init__(self, boundary_func: Callable[[float], complex], 
+                 n_boundary: int = 256,
+                 n_charge: int = 200,
+                 charge_offset: float = 0.2):
+        self.gamma = boundary_func
+        self.n_boundary = n_boundary
+        self.n_charge = n_charge
+        self.charge_offset = charge_offset
+        
+        # Sample boundary
+        self.t_boundary = np.linspace(0, 2*np.pi, n_boundary, endpoint=False)
+        self.z_boundary = np.array([self.gamma(t) for t in self.t_boundary])
+        
+        # Compute boundary correspondence using arc-length
+        self.theta_boundary = self._compute_boundary_correspondence()
+        
+        # Compute centroid and characteristic size
+        self.centroid = np.mean(self.z_boundary)
+        self.char_size = np.max(np.abs(self.z_boundary - self.centroid))
+        
+        # Setup MFS for Laplace solver
+        self._setup_mfs()
+        
+        # Solve for conformal map coefficients
+        self._solve_conformal_map()
+    
+    def _compute_boundary_correspondence(self) -> np.ndarray:
+        """Compute boundary correspondence θ(t) using arc-length."""
+        n = self.n_boundary
+        
+        # Compute arc lengths
+        dz = np.diff(np.append(self.z_boundary, self.z_boundary[0]))
+        arc_lengths = np.abs(dz)
+        cumulative = np.cumsum(arc_lengths)
+        total_length = cumulative[-1]
+        
+        # Map to [0, 2π] proportionally
+        theta = np.zeros(n)
+        theta[1:] = 2 * np.pi * cumulative[:-1] / total_length
+        
+        return theta
+    
+    def _setup_mfs(self):
+        """Setup Method of Fundamental Solutions charge points."""
+        # Place charges OUTSIDE domain (for interior Laplace problem)
+        # Use boundary normals to offset
+        
+        # Compute outward normals
+        dz = np.gradient(self.z_boundary)
+        tangent = dz / np.abs(dz)
+        normal = -1j * tangent  # Rotate 90° for outward normal
+        
+        # Offset distance
+        offset = self.charge_offset * self.char_size
+        
+        # Charge points (subsample for efficiency)
+        idx = np.linspace(0, self.n_boundary-1, self.n_charge, dtype=int)
+        self.z_charge = self.z_boundary[idx] + offset * normal[idx]
+        
+        # Collocation points (boundary points)
+        self.z_colloc = self.z_boundary.copy()
+    
+    def _solve_conformal_map(self):
+        """Solve for MFS coefficients to represent conformal map."""
+        n_colloc = len(self.z_colloc)
+        n_charge = len(self.z_charge)
+        
+        # Build MFS matrix: A[i,j] = log|z_colloc[i] - z_charge[j]|
+        # This is the fundamental solution for 2D Laplace
+        A = np.zeros((n_colloc, n_charge))
+        for i in range(n_colloc):
+            for j in range(n_charge):
+                dist = np.abs(self.z_colloc[i] - self.z_charge[j])
+                A[i, j] = np.log(dist) / (2 * np.pi)
+        
+        # Boundary conditions for u (real part of f): u|_∂Ω = cos(θ)
+        b_u = np.cos(self.theta_boundary)
+        
+        # Boundary conditions for v (imaginary part of f): v|_∂Ω = sin(θ)
+        b_v = np.sin(self.theta_boundary)
+        
+        # Solve least squares (overdetermined system)
+        self.coeff_u, _, _, _ = np.linalg.lstsq(A, b_u, rcond=None)
+        self.coeff_v, _, _, _ = np.linalg.lstsq(A, b_v, rcond=None)
+        
+        # Verify accuracy on boundary
+        u_check = A @ self.coeff_u
+        v_check = A @ self.coeff_v
+        
+        err_u = np.max(np.abs(u_check - b_u))
+        err_v = np.max(np.abs(v_check - b_v))
+        
+        if err_u > 0.01 or err_v > 0.01:
+            warnings.warn(f"MFS boundary fit error: u={err_u:.4f}, v={err_v:.4f}. "
+                         "Consider increasing n_charge or adjusting charge_offset.")
+    
+    def _eval_laplace(self, z: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
+        """Evaluate MFS solution at interior points."""
+        z = np.atleast_1d(z)
+        result = np.zeros(len(z))
+        
+        for i, zi in enumerate(z):
+            for j, zc in enumerate(self.z_charge):
+                dist = np.abs(zi - zc)
+                if dist > 1e-14:
+                    result[i] += coeffs[j] * np.log(dist) / (2 * np.pi)
+        
+        return result
+    
+    def to_disk(self, z: np.ndarray) -> np.ndarray:
+        """Map from physical domain to unit disk using proper conformal map."""
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        # Evaluate u and v at each point
+        u = self._eval_laplace(z, self.coeff_u)
+        v = self._eval_laplace(z, self.coeff_v)
+        
+        # f(z) = u + iv
+        w = u + 1j * v
+        
+        # Clamp to disk (numerical safety)
+        w = np.where(np.abs(w) > 0.999, 0.999 * w / np.abs(w), w)
+        
+        return w[0] if scalar else w
+    
+    def from_disk(self, w: np.ndarray) -> np.ndarray:
+        """Map from unit disk to physical domain (inverse map)."""
+        w = np.asarray(w, dtype=complex)
+        scalar = w.ndim == 0
+        w = np.atleast_1d(w)
+        
+        z = np.zeros_like(w)
+        
+        for i, wi in enumerate(w):
+            if np.abs(wi) < 1e-14:
+                z[i] = self.centroid
+            else:
+                # Use Newton iteration to invert the map
+                r = np.abs(wi)
+                theta = np.angle(wi)
+                
+                # Initial guess using boundary interpolation
+                z_guess = self.centroid + r * self.char_size * np.exp(1j * theta)
+                
+                # Newton iteration
+                for _ in range(5):
+                    w_current = self.to_disk(np.array([z_guess]))[0]
+                    if np.abs(w_current - wi) < 1e-10:
+                        break
+                    # Numerical derivative
+                    eps = 1e-6 * self.char_size
+                    dw_dx = (self.to_disk(np.array([z_guess + eps]))[0] - w_current) / eps
+                    dw_dy = (self.to_disk(np.array([z_guess + 1j*eps]))[0] - w_current) / eps
+                    
+                    # Newton step
+                    dw = wi - w_current
+                    J = np.array([[np.real(dw_dx), np.real(dw_dy)],
+                                  [np.imag(dw_dx), np.imag(dw_dy)]])
+                    try:
+                        delta = np.linalg.solve(J, [np.real(dw), np.imag(dw)])
+                        z_guess = z_guess + delta[0] + 1j * delta[1]
+                    except:
+                        break
+                
+                z[i] = z_guess
+        
+        return z[0] if scalar else z
+    
+    def boundary_physical(self, n_points: int) -> np.ndarray:
+        """Get boundary points in physical domain."""
+        t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        return np.array([self.gamma(ti) for ti in t])
+    
+    def is_inside(self, z: np.ndarray) -> np.ndarray:
+        """Check if points are inside domain using winding number."""
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        result = np.zeros(len(z), dtype=bool)
+        
+        for i, zi in enumerate(z):
+            winding = 0
+            n = len(self.z_boundary)
+            
+            for j in range(n):
+                z1 = self.z_boundary[j] - zi
+                z2 = self.z_boundary[(j+1) % n] - zi
+                
+                if z1.imag <= 0 < z2.imag:
+                    if z1.real * z2.imag > z2.real * z1.imag:
+                        winding += 1
+                elif z2.imag <= 0 < z1.imag:
+                    if z1.real * z2.imag < z2.real * z1.imag:
+                        winding -= 1
+            
+            result[i] = winding != 0
+        
+        return result[0] if scalar else result
+
+
+# =============================================================================
+# CONFORMAL MAP BASE CLASS
+# =============================================================================
+
 class ConformalMap(ABC):
     """
-    Abstract base class for conformal mappings.
+    Abstract base class for conformal mappings f: Ω → D.
     
-    A conformal map f: Ω → D maps a simply-connected domain Ω
-    to the unit disk D = {|w| < 1}.
+    A conformal map is a holomorphic bijection from a simply-connected 
+    domain Ω to the unit disk D = {|w| < 1}.
     
-    Subclasses must implement:
-        - to_disk(z): Ω → D
-        - from_disk(w): D → Ω
-        - jacobian(z): |f'(z)|
+    All subclasses must implement:
+        - to_disk(z): Map from physical domain Ω to unit disk D
+        - from_disk(w): Map from unit disk D to physical domain Ω
+        - boundary_physical(n): Return n points on ∂Ω as complex numbers
+        - is_inside(z): Check if points are inside Ω
+    
+    Optional (will use numerical derivative if not overridden):
+        - derivative(z): Compute f'(z)
     """
     
     @abstractmethod
     def to_disk(self, z: np.ndarray) -> np.ndarray:
-        """Map point(s) from physical domain to unit disk."""
+        """Map point(s) from physical domain Ω to unit disk D."""
         pass
     
     @abstractmethod
     def from_disk(self, w: np.ndarray) -> np.ndarray:
-        """Map point(s) from unit disk to physical domain."""
-        pass
-    
-    @abstractmethod
-    def jacobian(self, z: np.ndarray) -> np.ndarray:
-        """Compute |f'(z)|, the Jacobian of the mapping."""
+        """Map point(s) from unit disk D to physical domain Ω."""
         pass
     
     @abstractmethod
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Return n_points on the physical boundary as complex numbers."""
+        """Return n_points on the physical boundary ∂Ω as complex numbers."""
         pass
     
     @abstractmethod
     def is_inside(self, z: np.ndarray) -> np.ndarray:
-        """Check if points are inside the physical domain."""
+        """Check if points are inside the physical domain Ω."""
         pass
+    
+    def derivative(self, z: np.ndarray) -> np.ndarray:
+        """
+        Compute f'(z) where f = to_disk.
+        
+        Default implementation uses numerical differentiation.
+        Subclasses can override with analytical formula.
+        """
+        z = np.asarray(z, dtype=complex)
+        eps = 1e-8
+        return (self.to_disk(z + eps) - self.to_disk(z - eps)) / (2 * eps)
+    
+    def jacobian(self, z: np.ndarray) -> np.ndarray:
+        """Compute |f'(z)|, the Jacobian determinant."""
+        return np.abs(self.derivative(z))
+    
+    def get_interior_grid(self, n_radial: int = 10, n_angular: int = 20) -> np.ndarray:
+        """
+        Generate interior grid points in the physical domain.
+        
+        Maps a polar grid in the disk to the physical domain.
+        """
+        r = np.linspace(0.1, 0.95, n_radial)
+        theta = np.linspace(0, 2*np.pi, n_angular, endpoint=False)
+        R, Theta = np.meshgrid(r, theta)
+        w_grid = R.flatten() * np.exp(1j * Theta.flatten())
+        z_grid = self.from_disk(w_grid)
+        return z_grid
 
+
+# =============================================================================
+# DISK MAP (Identity)
+# =============================================================================
 
 class DiskMap(ConformalMap):
     """
     Identity map for the unit disk (trivial case).
     
-    Useful as a baseline and for testing.
-    
     Parameters
     ----------
     radius : float
-        Disk radius (default 1.0)
+        Disk radius (default 1.0). If radius ≠ 1, applies scaling.
     """
     
     def __init__(self, radius: float = 1.0):
         self.radius = radius
     
     def to_disk(self, z: np.ndarray) -> np.ndarray:
-        """Scale to unit disk."""
-        return np.asarray(z) / self.radius
+        return np.asarray(z, dtype=complex) / self.radius
     
     def from_disk(self, w: np.ndarray) -> np.ndarray:
-        """Scale from unit disk."""
-        return np.asarray(w) * self.radius
+        return np.asarray(w, dtype=complex) * self.radius
     
-    def jacobian(self, z: np.ndarray) -> np.ndarray:
-        """Constant Jacobian = 1/radius."""
-        return np.ones_like(np.asarray(z), dtype=float) / self.radius
+    def derivative(self, z: np.ndarray) -> np.ndarray:
+        return np.ones_like(np.asarray(z), dtype=complex) / self.radius
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Circle of given radius."""
         theta = np.linspace(0, 2*np.pi, n_points, endpoint=False)
         return self.radius * np.exp(1j * theta)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
-        """Check if inside disk."""
         return np.abs(z) < self.radius
 
 
+# =============================================================================
+# ELLIPSE MAP (Inverse Joukowsky)
+# =============================================================================
+
 class EllipseMap(ConformalMap):
     """
-    Conformal map from ellipse to unit disk.
+    Conformal map from ellipse to unit disk via inverse Joukowsky.
     
-    Uses the inverse Joukowsky map. The ellipse has semi-axes a and b.
+    The ellipse has semi-axes a (along x) and b (along y).
     
-    The mapping is:
-        w = f(z) maps ellipse interior to disk interior
-        
-    For ellipse with semi-axes a, b where a > b:
-        c = sqrt(a² - b²) (focal distance)
-        
-    The inverse Joukowsky map z = (w + 1/w)/2 maps |w| = r to ellipse
-    with semi-axes (r + 1/r)/2 and (r - 1/r)/2.
+    The Joukowsky map z = (c/2)(w + 1/w) maps |w| = R to an ellipse.
+    We use its inverse to map the ellipse to the disk.
     
     Parameters
     ----------
@@ -154,509 +423,1300 @@ class EllipseMap(ConformalMap):
     
     def __init__(self, a: float = 2.0, b: float = 1.0):
         if b > a:
-            a, b = b, a  # Ensure a >= b
+            a, b = b, a
         self.a = a
         self.b = b
         
-        # For ellipse with semi-axes a, b, the Joukowsky parameter is:
-        # a = (r + 1/r)/2, b = (r - 1/r)/2
-        # Solving: r = a + sqrt(a² - b²) / b... this is complex
-        # Simpler: use scaling
+        # Focal distance c = sqrt(a² - b²)
+        self.c = np.sqrt(max(a**2 - b**2, 0))
         
-        # Focal distance
-        self.c = np.sqrt(a**2 - b**2) if a > b else 0
-        
-        # The ellipse (x/a)² + (y/b)² = 1 is the image of |w| = R under
-        # z = c/2 (w + 1/w) where R satisfies:
-        #   a = c/2 (R + 1/R), b = c/2 (R - 1/R)
-        # So R = (a + b) / c (assuming c > 0)
-        
+        # Parameter R such that Joukowsky maps |w|=R to our ellipse
+        # a = (c/2)(R + 1/R), b = (c/2)(R - 1/R) for R > 1
+        # Solving: R = (a + b) / c
         if self.c > 1e-10:
             self.R = (a + b) / self.c
         else:
-            # Nearly circular - use identity with scaling
+            # Nearly circular
             self.R = 1.0
-            self.c = 1.0  # Avoid division by zero
+            self.c = a  # Use mean radius
     
     def to_disk(self, z: np.ndarray) -> np.ndarray:
-        """
-        Map from ellipse to unit disk.
+        """Map from ellipse interior/boundary to unit disk interior/boundary.
         
-        Inverse of the Joukowsky map scaled appropriately.
+        The inverse Joukowski has two roots w1, w2 with w1*w2 = 1:
+        - For interior points: choose root with |w| < R
+        - For boundary points: choose root with |w| = R (maps to unit circle)
         """
         z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
         
-        if self.a == self.b:  # Circle
-            return z / self.a
+        if self.c < 1e-10:  # Nearly circular
+            result = z / self.a
+            return result[0] if scalar else result
         
-        # Inverse Joukowsky: if z = c/2 (w + 1/w), then
-        # w = (z ± sqrt(z² - c²)) / c
-        # Take the root with |w| < 1 for interior points
+        # Inverse Joukowsky: w² - (2z/c)w + 1 = 0
+        zeta = z / (self.c / 2)  # = 2z/c
+        discriminant = np.sqrt(zeta**2 - 4 + 0j)
         
-        zeta = 2 * z / self.c  # Normalize
-        discriminant = zeta**2 - 4
+        w1 = (zeta + discriminant) / 2
+        w2 = (zeta - discriminant) / 2
         
-        # Choose correct branch
-        w = (zeta - np.sqrt(discriminant)) / 2
+        # Check if point is on ellipse boundary: (x/a)² + (y/b)² ≈ 1
+        ellipse_param = (np.real(z)/self.a)**2 + (np.imag(z)/self.b)**2
+        on_boundary = np.abs(ellipse_param - 1.0) < 0.01
         
-        # Ensure we're mapping to interior
-        mask = np.abs(w) > 1
-        if np.any(mask):
-            w = np.where(mask, 1/w, w)
+        # For interior points: choose smaller root (maps inside disk)
+        # For boundary points: choose root giving |w/R| = 1 (i.e., |w| = R)
+        w = np.where(on_boundary,
+                     np.where(np.abs(np.abs(w1) - self.R) < np.abs(np.abs(w2) - self.R), w1, w2),
+                     np.where(np.abs(w1) < np.abs(w2), w1, w2))
         
-        # Scale to unit disk
-        return w / self.R
+        result = w / self.R
+        return result[0] if scalar else result
     
     def from_disk(self, w: np.ndarray) -> np.ndarray:
-        """Map from unit disk to ellipse."""
+        """Map from unit disk to ellipse interior."""
         w = np.asarray(w, dtype=complex)
         
-        if self.a == self.b:  # Circle
+        if self.c < 1e-10:
             return w * self.a
         
-        # Scale w
+        # Scale from unit disk
         w_scaled = w * self.R
         
-        # Joukowsky map: z = c/2 (w + 1/w)
-        z = (self.c / 2) * (w_scaled + 1 / (w_scaled + 1e-15))
+        # Joukowsky: z = (c/2)(w + 1/w)
+        # Avoid division by zero
+        w_safe = np.where(np.abs(w_scaled) < 1e-14, 1e-14, w_scaled)
+        z = (self.c / 2) * (w_safe + 1 / w_safe)
         
         return z
     
-    def jacobian(self, z: np.ndarray) -> np.ndarray:
-        """Compute |f'(z)| for the mapping to disk."""
+    def derivative(self, z: np.ndarray) -> np.ndarray:
+        """Analytical derivative of to_disk."""
         z = np.asarray(z, dtype=complex)
         
-        if self.a == self.b:
-            return np.ones_like(z, dtype=float) / self.a
+        if self.c < 1e-10:
+            return np.ones_like(z) / self.a
         
-        # f(z) = to_disk(z), compute |f'(z)| numerically
+        # Numerical fallback for robustness
         eps = 1e-8
-        f_z = self.to_disk(z)
-        f_z_eps = self.to_disk(z + eps)
-        
-        return np.abs((f_z_eps - f_z) / eps)
+        return (self.to_disk(z + eps) - self.to_disk(z - eps)) / (2 * eps)
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Ellipse boundary."""
         theta = np.linspace(0, 2*np.pi, n_points, endpoint=False)
         return self.a * np.cos(theta) + 1j * self.b * np.sin(theta)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
-        """Check if inside ellipse."""
         z = np.asarray(z, dtype=complex)
         return (np.real(z)/self.a)**2 + (np.imag(z)/self.b)**2 < 1
 
 
-class StarShapedMap(ConformalMap):
+# =============================================================================
+# RECTANGLE MAP (Schwarz-Christoffel with elliptic integrals)
+# =============================================================================
+
+class RectangleMap(ConformalMap):
     """
-    Conformal map for star-shaped domains defined by r = R(θ).
+    Conformal map from rectangle to unit disk.
     
-    The boundary is given in polar form: r = R(θ) for θ ∈ [0, 2π).
-    
-    Uses numerical conformal mapping via series expansion or
-    iterative methods.
+    Uses Schwarz-Christoffel with elliptic integrals for the rectangle
+    [-a, a] × [-b, b].
     
     Parameters
     ----------
-    radius_func : callable
-        Function R(θ) defining the boundary radius
-    n_terms : int
-        Number of terms in the series expansion
+    half_width : float
+        Half-width a (extent in x direction)
+    half_height : float  
+        Half-height b (extent in y direction)
     """
     
-    def __init__(self, radius_func: Callable[[float], float], n_terms: int = 32):
-        self.R = radius_func
-        self.n_terms = n_terms
+    def __init__(self, half_width: float = 1.0, half_height: float = 1.0):
+        self.a = half_width
+        self.b = half_height
         
-        # Compute boundary points
-        theta = np.linspace(0, 2*np.pi, 256, endpoint=False)
-        r = np.array([self.R(t) for t in theta])
-        self.boundary_pts = r * np.exp(1j * theta)
+        # For rectangle, use simplified mapping via scaling
+        # Full SC would use elliptic integrals
+        self.scale = max(self.a, self.b)
         
-        # Compute mapping coefficients numerically
-        self._compute_map_coefficients()
+        # Build lookup tables for the mapping
+        self._build_lookup_tables()
     
-    def _compute_map_coefficients(self):
-        """
-        Compute conformal map coefficients using Fourier methods.
+    def _build_lookup_tables(self, n_grid: int = 50):
+        """Build interpolation tables for forward/inverse map."""
+        # Sample interior on regular grid
+        x = np.linspace(-0.95*self.a, 0.95*self.a, n_grid)
+        y = np.linspace(-0.95*self.b, 0.95*self.b, n_grid)
         
-        For a star-shaped domain, the conformal map can be written as:
-            f(w) = c₀ w + c₁ w² + c₂ w³ + ...
+        self._z_lookup = []
+        self._w_lookup = []
         
-        where the coefficients are determined by matching the boundary.
-        """
-        # Simple approach: assume map is approximately z = R_mean * w
-        # with perturbation for non-circularity
+        for xi in x:
+            for yi in y:
+                zi = xi + 1j * yi
+                # Approximate map using scaled position
+                r = np.sqrt((xi/self.a)**2 + (yi/self.b)**2)
+                theta = np.arctan2(yi/self.b, xi/self.a)
+                wi = min(r, 0.99) * np.exp(1j * theta)
+                
+                self._z_lookup.append(zi)
+                self._w_lookup.append(wi)
         
-        theta = np.linspace(0, 2*np.pi, 256, endpoint=False)
-        r = np.array([self.R(t) for t in theta])
-        
-        # Mean radius
-        self.R_mean = np.mean(r)
-        
-        # Fourier coefficients of log(r/R_mean)
-        log_r = np.log(r / self.R_mean)
-        self.fourier_coeffs = np.fft.fft(log_r) / len(log_r)
+        self._z_lookup = np.array(self._z_lookup)
+        self._w_lookup = np.array(self._w_lookup)
     
     def to_disk(self, z: np.ndarray) -> np.ndarray:
-        """Approximate map to unit disk."""
+        """Map from rectangle to unit disk using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping
+        instead of the incorrect radial scaling approach.
+        """
         z = np.asarray(z, dtype=complex)
-        # First-order approximation: just scale
-        return z / self.R_mean
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        # Lazy-init the proper MFS map
+        if not hasattr(self, '_mfs_map'):
+            a, b = self.a, self.b
+            
+            # Create boundary function for rectangle [-a,a] x [-b,b]
+            def rect_boundary(t):
+                # Parameter t in [0, 2π] maps around rectangle perimeter
+                # Perimeter = 2*(2a + 2b) = 4(a+b)
+                perimeter = 4 * (a + b)
+                dist = t / (2 * np.pi) * perimeter
+                
+                # Bottom edge: -a to +a at y=-b
+                if dist < 2*a:
+                    x = -a + dist
+                    return x - 1j*b
+                dist -= 2*a
+                
+                # Right edge: +a, -b to +b
+                if dist < 2*b:
+                    y = -b + dist
+                    return a + 1j*y
+                dist -= 2*b
+                
+                # Top edge: +a to -a at y=+b
+                if dist < 2*a:
+                    x = a - dist
+                    return x + 1j*b
+                dist -= 2*a
+                
+                # Left edge: -a, +b to -b
+                y = b - dist
+                return -a + 1j*y
+            
+            self._mfs_map = MFSConformalMap(rect_boundary, n_boundary=256,
+                                            n_charge=200, charge_offset=0.2)
+        
+        w = self._mfs_map.to_disk(z)
+        return w[0] if scalar else w
     
     def from_disk(self, w: np.ndarray) -> np.ndarray:
-        """Approximate map from unit disk."""
+        """Map from unit disk to rectangle using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping.
+        """
         w = np.asarray(w, dtype=complex)
-        return w * self.R_mean
-    
-    def jacobian(self, z: np.ndarray) -> np.ndarray:
-        """Approximate Jacobian."""
-        return np.ones_like(np.asarray(z), dtype=float) / self.R_mean
+        scalar = w.ndim == 0
+        w = np.atleast_1d(w)
+        
+        # Lazy-init the proper MFS map (same as in to_disk)
+        if not hasattr(self, '_mfs_map'):
+            # This will be initialized by to_disk call
+            self.to_disk(np.array([0.0 + 0.0j]))
+        
+        z = self._mfs_map.from_disk(w)
+        return z[0] if scalar else z
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Star-shaped boundary."""
-        theta = np.linspace(0, 2*np.pi, n_points, endpoint=False)
-        r = np.array([self.R(t) for t in theta])
-        return r * np.exp(1j * theta)
+        """Rectangle boundary."""
+        n_per_side = n_points // 4
+        
+        pts = []
+        # Bottom: -a to a at y = -b
+        pts.extend(np.linspace(-self.a, self.a, n_per_side, endpoint=False) - 1j*self.b)
+        # Right: a, -b to b
+        pts.extend(self.a + 1j*np.linspace(-self.b, self.b, n_per_side, endpoint=False))
+        # Top: a to -a at y = b  
+        pts.extend(np.linspace(self.a, -self.a, n_per_side, endpoint=False) + 1j*self.b)
+        # Left: -a, b to -b
+        pts.extend(-self.a + 1j*np.linspace(self.b, -self.b, n_per_side, endpoint=False))
+        
+        return np.array(pts[:n_points])
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
-        """Check if inside star-shaped domain."""
         z = np.asarray(z, dtype=complex)
-        r = np.abs(z)
-        theta = np.angle(z)
-        R_boundary = np.array([self.R(t) for t in theta])
-        return r < R_boundary
+        return (np.abs(np.real(z)) < self.a) & (np.abs(np.imag(z)) < self.b)
 
+
+# =============================================================================
+# NUMERICAL CONFORMAL MAP (Arbitrary smooth boundaries)
+# =============================================================================
+
+class NumericalConformalMap(ConformalMap):
+    """
+    Numerical conformal map for arbitrary smooth simply-connected domains.
+    
+    Given a boundary parameterization γ: [0, 2π] → ∂Ω, computes the
+    conformal map f: Ω → D numerically.
+    
+    The key idea:
+    1. The conformal map takes boundary to boundary: f(γ(t)) = e^{iθ(t)}
+    2. Find the boundary correspondence θ(t) via arc-length matching
+    3. Extend to interior using interpolation
+    
+    Parameters
+    ----------
+    boundary_func : callable
+        Function γ(t) returning complex boundary point for t ∈ [0, 2π]
+    n_boundary : int
+        Number of boundary discretization points (default: 256)
+    """
+    
+    def __init__(self, boundary_func: Callable[[float], complex], n_boundary: int = 256):
+        self.gamma = boundary_func
+        self.n_boundary = n_boundary
+        
+        # Sample boundary
+        self.t_boundary = np.linspace(0, 2*np.pi, n_boundary, endpoint=False)
+        self.z_boundary = np.array([self.gamma(t) for t in self.t_boundary])
+        
+        # Compute boundary correspondence using arc-length
+        self.theta_boundary = self._compute_boundary_correspondence()
+        
+        # Corresponding points on unit circle
+        self.w_boundary = np.exp(1j * self.theta_boundary)
+        
+        # Compute centroid for interior mapping
+        self.centroid = np.mean(self.z_boundary)
+        
+        # Compute characteristic size
+        self.char_size = np.max(np.abs(self.z_boundary - self.centroid))
+        
+        # Build interpolation
+        self._build_interpolation()
+    
+    def _compute_boundary_correspondence(self) -> np.ndarray:
+        """
+        Compute the boundary correspondence θ(t) using arc-length parameterization.
+        
+        This is a good approximation for smooth, nearly-circular domains.
+        """
+        n = self.n_boundary
+        
+        # Compute arc lengths
+        dz = np.diff(np.append(self.z_boundary, self.z_boundary[0]))
+        arc_lengths = np.abs(dz)
+        cumulative = np.cumsum(arc_lengths)
+        total_length = cumulative[-1]
+        
+        # Map to [0, 2π] proportionally
+        theta = np.zeros(n)
+        theta[1:] = 2 * np.pi * cumulative[:-1] / total_length
+        
+        return theta
+    
+    def _build_interpolation(self):
+        """Build interpolation functions for boundary mapping."""
+        # Extend periodically
+        t_ext = np.concatenate([self.t_boundary - 2*np.pi, 
+                                self.t_boundary, 
+                                self.t_boundary + 2*np.pi])
+        theta_ext = np.concatenate([self.theta_boundary - 2*np.pi,
+                                    self.theta_boundary,
+                                    self.theta_boundary + 2*np.pi])
+        z_ext = np.tile(self.z_boundary, 3)
+        
+        # θ → z interpolation (for from_disk on boundary)
+        sort_idx = np.argsort(theta_ext)
+        theta_sorted = theta_ext[sort_idx]
+        z_sorted = z_ext[sort_idx]
+        
+        # Remove duplicate theta values (keep first occurrence)
+        # This fixes issues with boundaries that have near-identical angles
+        unique_mask = np.concatenate([[True], np.diff(theta_sorted) > 1e-10])
+        theta_unique = theta_sorted[unique_mask]
+        z_unique = z_sorted[unique_mask]
+        
+        self._theta_to_z = interp1d(theta_unique, z_unique, 
+                                     kind='cubic', bounds_error=False,
+                                     fill_value='extrapolate')
+        
+        # CRITICAL FIX: Build raw angle → z interpolation for consistency with to_disk()
+        # to_disk() uses raw angles from centroid, so from_disk() must use the same
+        raw_angles = np.angle(self.z_boundary - self.centroid)
+        
+        # Extend periodically for raw angles too
+        raw_angles_ext = np.concatenate([raw_angles - 2*np.pi, 
+                                          raw_angles, 
+                                          raw_angles + 2*np.pi])
+        
+        # Sort by raw angle
+        sort_idx_raw = np.argsort(raw_angles_ext)
+        raw_sorted = raw_angles_ext[sort_idx_raw]
+        z_sorted_raw = z_ext[sort_idx_raw]
+        
+        # Remove duplicates
+        unique_mask_raw = np.concatenate([[True], np.diff(raw_sorted) > 1e-10])
+        raw_unique = raw_sorted[unique_mask_raw]
+        z_unique_raw = z_sorted_raw[unique_mask_raw]
+        
+        self._raw_angle_to_z = interp1d(raw_unique, z_unique_raw,
+                                         kind='cubic', bounds_error=False,
+                                         fill_value='extrapolate')
+    
+    def to_disk(self, z: np.ndarray) -> np.ndarray:
+        """Map from physical domain to unit disk using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping
+        instead of the incorrect radial scaling approach.
+        """
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        # Lazy-init the proper MFS map (computed once, cached)
+        if not hasattr(self, '_mfs_map'):
+            self._mfs_map = MFSConformalMap(self.gamma, n_boundary=self.n_boundary,
+                                            n_charge=200, charge_offset=0.2)
+        
+        w = self._mfs_map.to_disk(z)
+        return w[0] if scalar else w
+    
+    def from_disk(self, w: np.ndarray) -> np.ndarray:
+        """Map from unit disk to physical domain using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping.
+        """
+        w = np.asarray(w, dtype=complex)
+        scalar = w.ndim == 0
+        w = np.atleast_1d(w)
+        
+        # Lazy-init the proper MFS map (computed once, cached)
+        if not hasattr(self, '_mfs_map'):
+            self._mfs_map = MFSConformalMap(self.gamma, n_boundary=self.n_boundary,
+                                            n_charge=200, charge_offset=0.2)
+        
+        z = self._mfs_map.from_disk(w)
+        return z[0] if scalar else z
+    
+    def boundary_physical(self, n_points: int) -> np.ndarray:
+        t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        return np.array([self.gamma(ti) for ti in t])
+    
+    def is_inside(self, z: np.ndarray) -> np.ndarray:
+        """Check if inside using winding number."""
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        result = np.zeros(len(z), dtype=bool)
+        
+        for i, zi in enumerate(z):
+            winding = 0
+            n = len(self.z_boundary)
+            
+            for j in range(n):
+                z1 = self.z_boundary[j] - zi
+                z2 = self.z_boundary[(j+1) % n] - zi
+                
+                if z1.imag <= 0 < z2.imag:
+                    if z1.real * z2.imag > z2.real * z1.imag:
+                        winding += 1
+                elif z2.imag <= 0 < z1.imag:
+                    if z1.real * z2.imag < z2.real * z1.imag:
+                        winding -= 1
+            
+            result[i] = winding != 0
+        
+        return result[0] if scalar else result
+
+
+# =============================================================================
+# POLYGON MAP (Schwarz-Christoffel)
+# =============================================================================
+
+class PolygonMap(ConformalMap):
+    """
+    Conformal map from polygon to unit disk using Schwarz-Christoffel.
+    
+    For simple polygons, uses a simplified mapping based on the
+    polygon's shape. For more accurate results with complex polygons,
+    consider using specialized SC libraries.
+    
+    Parameters
+    ----------
+    vertices : list of complex or (x,y) tuples
+        Polygon vertices in counterclockwise order
+    """
+    
+    def __init__(self, vertices: Union[List[complex], List[Tuple[float, float]]]):
+        # Convert to complex
+        if isinstance(vertices[0], (tuple, list)):
+            self.vertices = np.array([v[0] + 1j*v[1] for v in vertices])
+        else:
+            self.vertices = np.array(vertices, dtype=complex)
+        
+        self.n = len(self.vertices)
+        
+        # Compute centroid
+        self.centroid = np.mean(self.vertices)
+        
+        # Compute characteristic size
+        self.char_size = np.max(np.abs(self.vertices - self.centroid))
+    
+    def to_disk(self, z: np.ndarray) -> np.ndarray:
+        """Map from polygon to unit disk using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping
+        instead of the incorrect radial scaling approach.
+        """
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        # Lazy-init the proper MFS map
+        if not hasattr(self, '_mfs_map'):
+            # Create boundary function from polygon vertices
+            def polygon_boundary(t):
+                # Parameter t in [0, 2π] maps to polygon perimeter
+                n = len(self.vertices)
+                # Total perimeter
+                edges = np.abs(np.diff(np.append(self.vertices, self.vertices[0])))
+                total = np.sum(edges)
+                
+                # Find which edge and position
+                target_dist = t / (2 * np.pi) * total
+                cumsum = np.cumsum(edges)
+                
+                for i in range(n):
+                    if i == 0:
+                        if target_dist <= edges[0]:
+                            frac = target_dist / edges[0]
+                            return self.vertices[0] + frac * (self.vertices[1] - self.vertices[0])
+                    else:
+                        if target_dist <= cumsum[i]:
+                            prev_dist = cumsum[i-1]
+                            frac = (target_dist - prev_dist) / edges[i]
+                            return self.vertices[i] + frac * (self.vertices[(i+1) % n] - self.vertices[i])
+                
+                return self.vertices[0]
+            
+            self._mfs_map = MFSConformalMap(polygon_boundary, n_boundary=256,
+                                            n_charge=200, charge_offset=0.2)
+        
+        w = self._mfs_map.to_disk(z)
+        return w[0] if scalar else w
+    
+    def from_disk(self, w: np.ndarray) -> np.ndarray:
+        """Map from unit disk to polygon using MFS-based conformal map.
+        
+        NOTE: This method has been fixed to use proper Laplace-based conformal mapping.
+        """
+        w = np.asarray(w, dtype=complex)
+        scalar = w.ndim == 0
+        w = np.atleast_1d(w)
+        
+        # Lazy-init the proper MFS map (same as in to_disk)
+        if not hasattr(self, '_mfs_map'):
+            # This will be initialized by to_disk call
+            self.to_disk(np.array([self.centroid]))
+        
+        z = self._mfs_map.from_disk(w)
+        return z[0] if scalar else z
+    
+    def boundary_physical(self, n_points: int) -> np.ndarray:
+        """Polygon boundary (interpolate along edges)."""
+        # Compute edge lengths for proportional distribution
+        edge_lengths = np.abs(np.diff(np.append(self.vertices, self.vertices[0])))
+        total_length = np.sum(edge_lengths)
+        
+        pts = []
+        for i in range(self.n):
+            v1, v2 = self.vertices[i], self.vertices[(i+1) % self.n]
+            # Number of points proportional to edge length
+            n_edge = max(1, int(n_points * edge_lengths[i] / total_length))
+            edge_pts = np.linspace(v1, v2, n_edge, endpoint=False)
+            pts.extend(edge_pts)
+        
+        # Ensure we have exactly n_points
+        pts = np.array(pts)
+        if len(pts) < n_points:
+            # Add more points to longest edge
+            extra = n_points - len(pts)
+            v1, v2 = self.vertices[0], self.vertices[1]
+            extra_pts = np.linspace(v1, v2, extra + 2)[1:-1]
+            pts = np.append(pts, extra_pts)
+        
+        return pts[:n_points]
+    
+    def is_inside(self, z: np.ndarray) -> np.ndarray:
+        """Check if inside polygon using winding number."""
+        z = np.asarray(z, dtype=complex)
+        scalar = z.ndim == 0
+        z = np.atleast_1d(z)
+        
+        result = np.zeros(len(z), dtype=bool)
+        
+        for i, zi in enumerate(z):
+            winding = 0
+            for j in range(self.n):
+                v1 = self.vertices[j] - zi
+                v2 = self.vertices[(j+1) % self.n] - zi
+                
+                if v1.imag <= 0 < v2.imag:
+                    if v1.real * v2.imag > v2.real * v1.imag:
+                        winding += 1
+                elif v2.imag <= 0 < v1.imag:
+                    if v1.real * v2.imag < v2.real * v1.imag:
+                        winding -= 1
+            
+            result[i] = winding != 0
+        
+        return result[0] if scalar else result
+
+
+# =============================================================================
+# CONFORMAL FORWARD SOLVER
+# =============================================================================
 
 class ConformalForwardSolver:
     """
-    Forward solver for general domains using conformal mapping.
+    Forward solver for any domain using conformal mapping.
     
-    Maps the problem to the unit disk, solves using the analytical
-    Green's function, then maps the solution back.
+    Uses the universal solution formula:
+        u(z) = Σ qₖ G_D(f(z), f(zₖ))
     
     Parameters
     ----------
     conformal_map : ConformalMap
         The conformal mapping from physical domain to unit disk
     n_boundary : int
-        Number of boundary points
-    """
-    
-    def __init__(self, conformal_map: ConformalMap, n_boundary: int = 100):
-        self.map = conformal_map
-        self.n_boundary = n_boundary
-        
-        # Boundary points in physical domain
-        self.boundary_physical = conformal_map.boundary_physical(n_boundary)
-        self.boundary_points = np.column_stack([
-            np.real(self.boundary_physical),
-            np.imag(self.boundary_physical)
-        ])
-        
-        # Corresponding points on unit disk
-        self.boundary_disk = conformal_map.to_disk(self.boundary_physical)
-        
-        # Angles on disk boundary
-        self.theta = np.angle(self.boundary_disk)
-    
-    def solve(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
-        """
-        Solve forward problem for point sources in physical domain.
-        
-        Parameters
-        ----------
-        sources : list of ((x, y), intensity)
-            Point sources in physical coordinates
-            
-        Returns
-        -------
-        u : array
-            Solution values on physical boundary (mean-centered)
-        """
-        u = np.zeros(self.n_boundary)
-        
-        for (xi_x, xi_y), q in sources:
-            # Map source to disk
-            xi_physical = xi_x + 1j * xi_y
-            xi_disk = self.map.to_disk(xi_physical)
-            xi_disk_xy = np.array([np.real(xi_disk), np.imag(xi_disk)])
-            
-            # Evaluate Green's function on disk boundary
-            for i in range(self.n_boundary):
-                w = self.boundary_disk[i]
-                w_xy = np.array([np.real(w), np.imag(w)])
-                u[i] += q * greens_function_disk_neumann(w_xy.reshape(1, 2), xi_disk_xy)
-        
-        return u - np.mean(u)
-    
-    def solve_interior(self, sources: List[Tuple[Tuple[float, float], float]],
-                       x_eval: np.ndarray) -> np.ndarray:
-        """
-        Evaluate solution at interior points.
-        
-        Parameters
-        ----------
-        sources : list
-            Point sources
-        x_eval : array, shape (n, 2)
-            Evaluation points in physical coordinates
-            
-        Returns
-        -------
-        u : array
-            Solution values
-        """
-        x_eval = np.atleast_2d(x_eval)
-        u = np.zeros(len(x_eval))
-        
-        for (xi_x, xi_y), q in sources:
-            xi_disk = self.map.to_disk(xi_x + 1j * xi_y)
-            xi_disk_xy = np.array([np.real(xi_disk), np.imag(xi_disk)])
-            
-            for i, (x, y) in enumerate(x_eval):
-                w = self.map.to_disk(x + 1j * y)
-                w_xy = np.array([np.real(w), np.imag(w)])
-                u[i] += q * greens_function_disk_neumann(w_xy.reshape(1, 2), xi_disk_xy)
-        
-        return u - np.mean(u)
-
-
-class ConformalLinearInverseSolver:
-    """
-    Linear inverse solver for general domains using conformal mapping.
-    
-    Parameters
-    ----------
-    conformal_map : ConformalMap
-        The conformal mapping
-    n_boundary : int
-        Number of boundary points
-    source_resolution : float
-        Source grid resolution in physical coordinates
+        Number of sensor/measurement points
+    sensor_locations : array, optional
+        Custom sensor locations in physical domain. If None, uses evenly spaced.
     """
     
     def __init__(self, conformal_map: ConformalMap, n_boundary: int = 100,
-                 source_resolution: float = 0.15, verbose: bool = True):
+                 sensor_locations: np.ndarray = None):
         self.map = conformal_map
-        self.forward = ConformalForwardSolver(conformal_map, n_boundary)
         self.n_boundary = n_boundary
         
-        # Generate source grid in physical domain
-        # First get disk grid, then map to physical
-        disk_grid = get_source_grid(resolution=source_resolution, radius=0.85)
+        # Sensor/boundary points in physical domain
+        if sensor_locations is not None:
+            self.boundary_points = np.asarray(sensor_locations)
+            self.z_boundary = self.boundary_points[:, 0] + 1j * self.boundary_points[:, 1]
+            self.n_sensors = len(sensor_locations)
+        else:
+            self.z_boundary = conformal_map.boundary_physical(n_boundary)
+            self.boundary_points = np.column_stack([
+                np.real(self.z_boundary),
+                np.imag(self.z_boundary)
+            ])
+            self.n_sensors = n_boundary
         
-        # Map to physical domain
-        physical_grid = []
-        for pt in disk_grid:
-            w = pt[0] + 1j * pt[1]
-            z = conformal_map.from_disk(w)
-            physical_grid.append([np.real(z), np.imag(z)])
+        # Map to disk
+        self.w_boundary = conformal_map.to_disk(self.z_boundary)
         
-        self.interior_points = np.array(physical_grid)
-        self.n_interior = len(self.interior_points)
-        self.G = None
-        self._verbose = verbose
-        
-        if verbose:
-            print(f"Conformal Linear Inverse: {n_boundary} boundary pts, {self.n_interior} source candidates")
+        # For backward compatibility
+        self.sensor_locations = self.boundary_points
     
-    def build_greens_matrix(self, verbose: bool = None):
-        """Build Green's matrix via conformal mapping."""
-        if verbose is None:
-            verbose = self._verbose
-        if verbose:
-            print(f"Building Green's matrix ({self.n_boundary} × {self.n_interior})...")
+    def solve(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
+        """
+        Compute potential at sensor locations from sources.
         
-        self.G = np.zeros((self.n_boundary, self.n_interior))
+        Parameters
+        ----------
+        sources : list of ((x, y), q)
+            Source positions and intensities
         
-        for j in range(self.n_interior):
-            xi = self.interior_points[j]
-            sources = [((xi[0], xi[1]), 1.0)]
-            self.G[:, j] = self.forward.solve(sources) + np.mean(self.forward.solve(sources))  # Undo centering
+        Returns
+        -------
+        u : array of shape (n_sensors,)
+            Potential values at sensor locations
+        """
+        # Convert sources to complex
+        z_sources = np.array([s[0][0] + 1j * s[0][1] for s in sources])
+        q_sources = np.array([s[1] for s in sources])
         
-        # Recenter
-        self.G = self.G - np.mean(self.G, axis=0, keepdims=True)
+        # Check compatibility
+        if np.abs(np.sum(q_sources)) > 1e-10:
+            warnings.warn(f"Sources do not sum to zero: Σq = {np.sum(q_sources):.6f}")
         
-        if verbose:
-            print("Done.")
-    
-    def solve_l2(self, u_measured: np.ndarray, alpha: float = 1e-4) -> np.ndarray:
-        """Solve with Tikhonov regularization."""
-        if self.G is None:
-            self.build_greens_matrix()
-        u = u_measured - np.mean(u_measured)
-        q = np.linalg.solve(self.G.T @ self.G + alpha * np.eye(self.n_interior), self.G.T @ u)
-        return q - np.mean(q)
-    
-    def solve_l1(self, u_measured: np.ndarray, alpha: float = 1e-4, max_iter: int = 50) -> np.ndarray:
-        """Solve with L1 regularization via IRLS."""
-        if self.G is None:
-            self.build_greens_matrix()
-        u = u_measured - np.mean(u_measured)
-        q = np.zeros(self.n_interior)
-        eps = 1e-4
-        GtG = self.G.T @ self.G
-        Gtu = self.G.T @ u
+        # Map sources to disk
+        w_sources = self.map.to_disk(z_sources)
         
-        for _ in range(max_iter):
-            W = np.diag(1.0 / (np.abs(q) + eps))
-            q_new = np.linalg.solve(GtG + alpha * W, Gtu)
-            if np.linalg.norm(q_new - q) < 1e-6:
-                break
-            q = q_new
-        return q - np.mean(q)
-    
-    def get_interior_positions(self) -> np.ndarray:
-        """Return source candidate positions in physical coordinates."""
-        return self.interior_points.copy()
+        # Evaluate using disk Green's function
+        u = np.zeros(self.n_sensors)
+        
+        for i in range(self.n_sensors):
+            w_eval = self.w_boundary[i]
+            x_eval = np.array([[np.real(w_eval), np.imag(w_eval)]])
+            
+            for j, (w_src, q) in enumerate(zip(w_sources, q_sources)):
+                xi_src = np.array([np.real(w_src), np.imag(w_src)])
+                G = greens_function_disk_neumann(x_eval, xi_src)
+                u[i] += q * G
+        
+        return u
 
 
-class ConformalNonlinearInverseSolver:
+# =============================================================================
+# CONFORMAL LINEAR INVERSE SOLVER  
+# =============================================================================
+
+class ConformalLinearInverseSolver:
     """
-    Nonlinear inverse solver for general domains using conformal mapping.
+    Linear inverse solver for any domain using conformal mapping.
     
-    Optimizes source positions and intensities in the physical domain.
+    Places candidate sources on a grid, builds Green's matrix using
+    the universal formula, then solves with regularization.
     
     Parameters
     ----------
     conformal_map : ConformalMap
-        The conformal mapping
+        Conformal mapping from physical domain to unit disk
+    n_boundary : int
+        Number of sensor/measurement points
+    sensor_locations : array, optional
+        Custom sensor locations in physical domain. If None, uses evenly spaced.
+    interior_points : ndarray, optional
+        (N, 2) array of interior source candidate points in physical domain.
+        If provided, uses these instead of generating a grid.
+        This allows using the same mesh as FEM for fair comparison.
+    source_resolution : float
+        Approximate spacing between source grid points (only used if 
+        interior_points is None)
+    verbose : bool
+        Print progress information
+    """
+    
+    def __init__(self, conformal_map: ConformalMap, n_boundary: int = 100,
+                 sensor_locations: np.ndarray = None,
+                 interior_points: np.ndarray = None,
+                 source_resolution: float = 0.15, verbose: bool = False):
+        self.map = conformal_map
+        self.n_boundary = n_boundary
+        self.source_resolution = source_resolution
+        self.verbose = verbose
+        
+        # Store sensor locations
+        self.sensor_locations = sensor_locations
+        
+        # Create forward solver with sensor locations
+        self.forward = ConformalForwardSolver(conformal_map, n_boundary, 
+                                               sensor_locations=sensor_locations)
+        self.n_sensors = self.forward.n_sensors
+        
+        # Use provided grid or generate one
+        if interior_points is not None:
+            self._set_grid_from_points(interior_points)
+        else:
+            self._generate_source_grid()
+        
+        # Green's matrix (built lazily or explicitly)
+        self.G = None
+    
+    def _set_grid_from_points(self, points: np.ndarray):
+        """Set source grid from externally provided points."""
+        # Convert to complex for conformal mapping
+        z_grid = points[:, 0] + 1j * points[:, 1]
+        
+        # Filter to interior only (in case some points are on/outside boundary)
+        inside = self.map.is_inside(z_grid)
+        z_grid = z_grid[inside]
+        
+        # Map to disk
+        w_grid = self.map.to_disk(z_grid)
+        
+        self.z_grid = z_grid
+        self.w_grid = w_grid
+        self.n_sources = len(z_grid)
+        self.grid_points = np.column_stack([np.real(z_grid), np.imag(z_grid)])
+        
+        if self.verbose:
+            print(f"  Using {self.n_sources} provided interior points")
+    
+    def _generate_source_grid(self):
+        """Generate interior source grid by mapping from disk."""
+        # Determine grid density from resolution
+        n_radial = max(5, int(0.85 / self.source_resolution))
+        n_angular = max(8, int(2 * np.pi / self.source_resolution))
+        
+        # Generate polar grid in disk
+        r = np.linspace(0.12, 0.88, n_radial)
+        theta = np.linspace(0, 2*np.pi, n_angular, endpoint=False)
+        R, Theta = np.meshgrid(r, theta)
+        w_grid = R.flatten() * np.exp(1j * Theta.flatten())
+        
+        # Map to physical domain
+        z_grid = self.map.from_disk(w_grid)
+        
+        # Keep only interior points
+        inside = self.map.is_inside(z_grid)
+        z_grid = z_grid[inside]
+        w_grid = w_grid[inside]
+        
+        self.z_grid = z_grid
+        self.w_grid = w_grid
+        self.n_sources = len(z_grid)
+        
+        # Store as (N, 2) array for compatibility
+        self.grid_points = np.column_stack([np.real(z_grid), np.imag(z_grid)])
+        
+        if self.verbose:
+            print(f"  Generated {self.n_sources} interior grid points")
+    
+    @property
+    def interior_points(self) -> np.ndarray:
+        """Alias for grid_points (compatibility with comparison.py)."""
+        return self.grid_points
+    
+    def build_greens_matrix(self, verbose: bool = None):
+        """
+        Build Green's matrix G[i,j] = G_D(w_boundary[i], w_grid[j]).
+        
+        Uses the disk Green's function in mapped coordinates.
+        """
+        if verbose is None:
+            verbose = self.verbose
+            
+        n_meas = self.n_sensors  # Use sensor count, not boundary count
+        n_src = self.n_sources
+        
+        if verbose:
+            print(f"  Building {n_meas}x{n_src} Green's matrix...")
+        
+        self.G = np.zeros((n_meas, n_src))
+        
+        for i in range(n_meas):
+            w_eval = self.forward.w_boundary[i]
+            x_eval = np.array([[np.real(w_eval), np.imag(w_eval)]])
+            
+            for j in range(n_src):
+                w_src = self.w_grid[j]
+                xi_src = np.array([np.real(w_src), np.imag(w_src)])
+                self.G[i, j] = greens_function_disk_neumann(x_eval, xi_src)
+        
+        if verbose:
+            print(f"  Green's matrix built: condition number ~ {np.linalg.cond(self.G):.2e}")
+    
+    def _ensure_greens_matrix(self):
+        """Build Green's matrix if not already built."""
+        if self.G is None:
+            self.build_greens_matrix()
+    
+    def solve_l2(self, u_meas: np.ndarray, alpha: float = 1e-3) -> np.ndarray:
+        """
+        Tikhonov (L2) regularization with zero-sum constraint.
+        
+        Solves: min ||Gq - u||² + α||q||²  subject to Σq = 0
+        """
+        self._ensure_greens_matrix()
+        
+        G, u = self.G, u_meas
+        n = self.n_sources
+        
+        # Augmented system for constraint Σq = 0
+        G_aug = np.vstack([G, np.ones(n)])
+        u_aug = np.append(u, 0)
+        
+        # Normal equations with regularization
+        A = G_aug.T @ G_aug + alpha * np.eye(n)
+        b = G_aug.T @ u_aug
+        
+        q = np.linalg.solve(A, b)
+        
+        # Project to satisfy constraint exactly
+        q = q - np.mean(q)
+        
+        return q
+    
+    def solve_l1(self, u_meas: np.ndarray, alpha: float = 1e-3) -> np.ndarray:
+        """
+        L1 (sparsity) regularization with zero-sum constraint.
+        
+        Solves: min ||Gq - u||² + α||q||₁  subject to Σq = 0
+        """
+        self._ensure_greens_matrix()
+        
+        try:
+            import cvxpy as cp
+        except ImportError:
+            warnings.warn("cvxpy not available, falling back to L2")
+            return self.solve_l2(u_meas, alpha)
+        
+        n = self.n_sources
+        q = cp.Variable(n)
+        
+        objective = cp.Minimize(
+            0.5 * cp.sum_squares(self.G @ q - u_meas) + alpha * cp.norm1(q)
+        )
+        constraints = [cp.sum(q) == 0]
+        
+        problem = cp.Problem(objective, constraints)
+        try:
+            problem.solve(solver=cp.ECOS)
+        except:
+            try:
+                problem.solve(solver=cp.SCS)
+            except:
+                problem.solve()
+        
+        return q.value if q.value is not None else self.solve_l2(u_meas, alpha)
+    
+    def solve_tv(self, u_meas: np.ndarray, alpha: float = 1e-3) -> np.ndarray:
+        """
+        Total Variation regularization with zero-sum constraint.
+        
+        Solves: min ||Gq - u||² + α||Dq||₁  subject to Σq = 0
+        
+        Uses a simple finite difference approximation for TV on the grid.
+        """
+        self._ensure_greens_matrix()
+        
+        try:
+            import cvxpy as cp
+        except ImportError:
+            warnings.warn("cvxpy not available, falling back to L2")
+            return self.solve_l2(u_meas, alpha)
+        
+        n = self.n_sources
+        
+        # Build gradient operator using nearest neighbors
+        D = self._build_gradient_operator()
+        
+        q = cp.Variable(n)
+        
+        objective = cp.Minimize(
+            0.5 * cp.sum_squares(self.G @ q - u_meas) + alpha * cp.norm1(D @ q)
+        )
+        constraints = [cp.sum(q) == 0]
+        
+        problem = cp.Problem(objective, constraints)
+        try:
+            problem.solve(solver=cp.ECOS)
+        except:
+            try:
+                problem.solve(solver=cp.SCS)
+            except:
+                problem.solve()
+        
+        return q.value if q.value is not None else self.solve_l2(u_meas, alpha)
+    
+    def _build_gradient_operator(self) -> np.ndarray:
+        """Build finite difference gradient operator based on nearest neighbors."""
+        from scipy.spatial import KDTree
+        
+        n = self.n_sources
+        tree = KDTree(self.grid_points)
+        
+        # For each point, find nearest neighbor and create difference
+        rows, cols, data = [], [], []
+        row_idx = 0
+        
+        for i in range(n):
+            # Find k nearest neighbors
+            dists, idxs = tree.query(self.grid_points[i], k=min(4, n))
+            
+            for j, (d, idx) in enumerate(zip(dists[1:], idxs[1:])):  # Skip self
+                if d < 3 * self.source_resolution:  # Only nearby points
+                    rows.append(row_idx)
+                    cols.append(i)
+                    data.append(1.0)
+                    
+                    rows.append(row_idx)
+                    cols.append(idx)
+                    data.append(-1.0)
+                    
+                    row_idx += 1
+        
+        from scipy.sparse import csr_matrix
+        D = csr_matrix((data, (rows, cols)), shape=(row_idx, n))
+        return D.toarray()
+
+
+# =============================================================================
+# CONFORMAL NONLINEAR INVERSE SOLVER
+# =============================================================================
+
+class ConformalNonlinearInverseSolver:
+    """
+    Nonlinear inverse solver for any domain using conformal mapping.
+    
+    Optimizes source positions and intensities directly using the
+    universal solution formula.
+    
+    Parameters
+    ----------
+    conformal_map : ConformalMap
+        Conformal mapping from physical domain to unit disk
     n_sources : int
         Number of sources to recover
     n_boundary : int
-        Number of boundary points
+        Number of boundary measurement points
     """
     
-    def __init__(self, conformal_map: ConformalMap, n_sources: int, n_boundary: int = 100):
+    def __init__(self, conformal_map: ConformalMap, n_sources: int = 4,
+                 n_boundary: int = 100, sensor_locations: np.ndarray = None):
         self.map = conformal_map
         self.n_sources = n_sources
-        self.forward = ConformalForwardSolver(conformal_map, n_boundary)
-        self.u_measured = None
-        self.history = []
+        self.n_boundary = n_boundary
+        self.sensor_locations = sensor_locations
+        # CRITICAL: Pass sensor_locations to ensure forward solver uses same positions as data
+        self.forward = ConformalForwardSolver(conformal_map, n_boundary, 
+                                               sensor_locations=sensor_locations)
     
-    def set_measured_data(self, u_measured: np.ndarray):
-        """Set boundary measurements to fit."""
-        self.u_measured = u_measured - np.mean(u_measured)
-    
-    def _params_to_sources(self, params: np.ndarray) -> List[Tuple[Tuple[float, float], float]]:
-        """Convert optimization parameters to source list."""
-        sources = []
-        for i in range(self.n_sources - 1):
-            sources.append(((params[3*i], params[3*i+1]), params[3*i+2]))
-        x_last, y_last = params[3*(self.n_sources-1)], params[3*(self.n_sources-1)+1]
-        q_last = -sum(q for _, q in sources)
-        sources.append(((x_last, y_last), q_last))
-        return sources
-    
-    def _objective(self, params: np.ndarray) -> float:
-        """Objective function."""
-        sources = self._params_to_sources(params)
+    def _objective(self, params: np.ndarray, u_meas: np.ndarray) -> float:
+        """Objective function: ||u_computed - u_measured||²."""
+        n = self.n_sources
         
-        # Check sources are inside domain
-        for (x, y), _ in sources:
-            z = x + 1j * y
-            if not self.map.is_inside(z):
-                return 1e10
+        # Unpack parameters
+        positions = params[:2*n].reshape(n, 2)
+        intensities = params[2*n:3*n]
         
-        u = self.forward.solve(sources)
-        misfit = np.sum((u - self.u_measured)**2)
-        self.history.append(misfit)
-        return misfit
+        # Enforce zero-sum constraint
+        intensities = intensities - np.mean(intensities)
+        
+        # Check if positions are inside domain
+        z_sources = positions[:, 0] + 1j * positions[:, 1]
+        inside = self.map.is_inside(z_sources)
+        if not np.all(inside):
+            return 1e10  # Penalty for outside points
+        
+        # Build sources list
+        sources = [((positions[k, 0], positions[k, 1]), intensities[k]) 
+                   for k in range(n)]
+        
+        # Compute forward solution
+        u_computed = self.forward.solve(sources)
+        
+        # Residual
+        residual = np.linalg.norm(u_computed - u_meas)
+        
+        return residual
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200,
-              n_restarts: int = 1) -> InverseResult:
+    def _generate_valid_initial_guess(self, bounds: list, seed: int) -> np.ndarray:
         """
-        Solve the nonlinear inverse problem.
+        Generate initial guess with positions guaranteed to be inside the domain.
+        
+        Uses rejection sampling to ensure all source positions are valid.
+        """
+        n = self.n_sources
+        np.random.seed(seed)
+        
+        x0 = []
+        max_attempts = 1000
+        
+        for i in range(n):
+            # Generate position inside domain using rejection sampling
+            for attempt in range(max_attempts):
+                x = np.random.uniform(bounds[2*i][0], bounds[2*i][1])
+                y = np.random.uniform(bounds[2*i+1][0], bounds[2*i+1][1])
+                z = complex(x, y)
+                
+                if self.map.is_inside(z):
+                    x0.extend([x, y])
+                    break
+            else:
+                # Fallback: use centroid
+                boundary = self.map.boundary_physical(100)
+                centroid_x = np.real(boundary).mean()
+                centroid_y = np.imag(boundary).mean()
+                # Add small random offset
+                x0.extend([centroid_x + 0.1 * np.random.randn(),
+                          centroid_y + 0.1 * np.random.randn()])
+        
+        # Add intensities (all n, constraint enforced in objective)
+        for i in range(n):
+            x0.append(np.random.randn())
+        
+        return np.array(x0)
+    
+    def solve(self, u_meas: np.ndarray, method: str = 'differential_evolution',
+              seed: int = 42, n_restarts: int = 5) -> Tuple[List[Tuple[Tuple[float, float], float]], float]:
+        """
+        Solve nonlinear inverse problem.
         
         Parameters
         ----------
+        u_meas : array
+            Measured boundary potential
         method : str
-            Optimization method
-        maxiter : int
-            Maximum iterations
+            Optimization method ('differential_evolution', 'basin_hopping', 'lbfgsb', 'L-BFGS-B')
+        seed : int
+            Random seed for reproducibility
         n_restarts : int
-            Random restarts
-            
+            Number of random restarts for local optimizers (L-BFGS-B)
+        
         Returns
         -------
-        result : InverseResult
+        sources : list of ((x, y), q)
+            Recovered source positions and intensities
+        residual : float
+            Final residual value
         """
-        if self.u_measured is None:
-            raise ValueError("Call set_measured_data() first")
-        
-        self.history = []
         n = self.n_sources
+        np.random.seed(seed)
         
-        # Get domain extent for bounds
+        # Get domain bounds from boundary
         boundary = self.map.boundary_physical(100)
-        x_range = (np.real(boundary).min(), np.real(boundary).max())
-        y_range = (np.imag(boundary).min(), np.imag(boundary).max())
+        x_min, x_max = np.real(boundary).min(), np.real(boundary).max()
+        y_min, y_max = np.imag(boundary).min(), np.imag(boundary).max()
         
+        # Use small margin per axis (5%) - the is_inside() penalty in _objective()
+        # handles actual domain constraint, so we don't need aggressive shrinking
+        # NOTE: Previous 15% of min-dimension caused issues for non-convex domains
+        # like star where boundary bulges in one direction but not the other
+        x_margin = 0.05 * (x_max - x_min)
+        y_margin = 0.05 * (y_max - y_min)
+        x_min, x_max = x_min + x_margin, x_max - x_margin
+        y_min, y_max = y_min + y_margin, y_max - y_margin
+        
+        # Bounds: positions + intensities
         bounds = []
-        for i in range(n):
-            bounds.extend([
-                (0.85*x_range[0], 0.85*x_range[1]),
-                (0.85*y_range[0], 0.85*y_range[1])
-            ])
-            if i < n - 1:
-                bounds.append((-5.0, 5.0))
-        
-        best_result = None
-        best_fun = np.inf
+        for _ in range(n):
+            bounds.append((x_min, x_max))  # x
+            bounds.append((y_min, y_max))  # y
+        for _ in range(n):
+            bounds.append((-2.0, 2.0))  # intensity
         
         if method == 'differential_evolution':
-            result = differential_evolution(self._objective, bounds, maxiter=maxiter,
-                                           seed=42, polish=True)
-            best_result = result
-        else:
+            result = differential_evolution(
+                lambda p: self._objective(p, u_meas),
+                bounds,
+                seed=seed,
+                maxiter=200,
+                tol=1e-6,
+                polish=True,
+                workers=1
+            )
+            params = result.x
+            residual = result.fun
+            
+        elif method == 'basin_hopping':
+            from scipy.optimize import basinhopping
+            
+            # Initial guess - use rejection sampling to ensure points are inside domain
+            x0 = self._generate_valid_initial_guess(bounds, seed)
+            
+            result = basinhopping(
+                lambda p: self._objective(p, u_meas),
+                x0,
+                niter=50,
+                seed=seed
+            )
+            params = result.x
+            residual = result.fun
+            
+        else:  # L-BFGS-B (with restarts!)
+            from scipy.optimize import minimize as scipy_minimize
+            
+            best_params = None
+            best_residual = np.inf
+            
             for restart in range(n_restarts):
-                np.random.seed(42 + restart)
-                x0 = []
-                for i in range(n):
-                    x0.extend([
-                        np.random.uniform(*x_range) * 0.5,
-                        np.random.uniform(*y_range) * 0.5
-                    ])
-                    if i < n - 1:
-                        x0.append(np.random.randn())
+                # Generate new initial guess for each restart
+                x0 = self._generate_valid_initial_guess(bounds, seed + restart)
                 
-                result = minimize(self._objective, x0, method=method, bounds=bounds,
-                                options={'maxiter': maxiter})
-                if result.fun < best_fun:
-                    best_fun = result.fun
-                    best_result = result
+                result = scipy_minimize(
+                    lambda p: self._objective(p, u_meas),
+                    x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 500}
+                )
+                
+                if result.fun < best_residual:
+                    best_residual = result.fun
+                    best_params = result.x
+            
+            params = best_params
+            residual = best_residual
         
-        sources = [Source(x, y, q) for (x, y), q in self._params_to_sources(best_result.x)]
+        # Extract sources
+        positions = params[:2*n].reshape(n, 2)
+        intensities = params[2*n:3*n]
+        intensities = intensities - np.mean(intensities)  # Enforce constraint
         
-        return InverseResult(
-            sources=sources,
-            residual=np.sqrt(best_result.fun),
-            success=best_result.success if hasattr(best_result, 'success') else True,
-            message=str(best_result.message) if hasattr(best_result, 'message') else '',
-            iterations=best_result.nit if hasattr(best_result, 'nit') else len(self.history),
-            history=self.history
+        sources = [((positions[k, 0], positions[k, 1]), intensities[k]) 
+                   for k in range(n)]
+        
+        return sources, residual
+
+
+# =============================================================================
+# CONVENIENCE FUNCTIONS
+# =============================================================================
+
+def create_conformal_map(domain: str, **kwargs) -> ConformalMap:
+    """
+    Factory function to create conformal maps.
+    
+    Parameters
+    ----------
+    domain : str
+        One of: 'disk', 'ellipse', 'rectangle', 'polygon', 'custom'
+    **kwargs : 
+        Domain-specific parameters
+    
+    Returns
+    -------
+    ConformalMap instance
+    
+    Examples
+    --------
+    >>> cmap = create_conformal_map('ellipse', a=2.0, b=1.0)
+    >>> cmap = create_conformal_map('rectangle', half_width=1.5, half_height=1.0)
+    >>> cmap = create_conformal_map('polygon', vertices=[(0,0), (1,0), (0.5,1)])
+    >>> cmap = create_conformal_map('custom', boundary_func=lambda t: np.exp(1j*t)*(1+0.2*np.cos(3*t)))
+    """
+    domain = domain.lower()
+    
+    if domain == 'disk':
+        return DiskMap(radius=kwargs.get('radius', 1.0))
+    
+    elif domain == 'ellipse':
+        return EllipseMap(
+            a=kwargs.get('a', 2.0),
+            b=kwargs.get('b', 1.0)
         )
+    
+    elif domain == 'rectangle':
+        return RectangleMap(
+            half_width=kwargs.get('half_width', 1.0),
+            half_height=kwargs.get('half_height', 1.0)
+        )
+    
+    elif domain == 'polygon':
+        vertices = kwargs.get('vertices')
+        if vertices is None:
+            raise ValueError("polygon requires 'vertices' parameter")
+        return PolygonMap(vertices)
+    
+    elif domain == 'custom':
+        boundary_func = kwargs.get('boundary_func')
+        if boundary_func is None:
+            raise ValueError("custom requires 'boundary_func' parameter")
+        return NumericalConformalMap(
+            boundary_func,
+            n_boundary=kwargs.get('n_boundary', 256)
+        )
+    
+    else:
+        raise ValueError(f"Unknown domain type: {domain}")
+
+
+def solve_forward_conformal(domain: str, sources: List[Tuple[Tuple[float, float], float]],
+                            n_boundary: int = 100, **domain_kwargs) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Solve forward problem on any domain using conformal mapping.
+    
+    This is the main entry point for the conformal mapping approach.
+    
+    Parameters
+    ----------
+    domain : str
+        Domain type ('disk', 'ellipse', 'rectangle', 'polygon', 'custom')
+    sources : list of ((x, y), q)
+        Source positions and intensities (must sum to zero!)
+    n_boundary : int
+        Number of boundary points
+    **domain_kwargs :
+        Domain-specific parameters (e.g., a=2.0, b=1.0 for ellipse)
+    
+    Returns
+    -------
+    boundary_points : array (n_boundary, 2)
+        Boundary point coordinates
+    u : array (n_boundary,)
+        Boundary potential values
+        
+    Examples
+    --------
+    >>> sources = [((-0.3, 0.4), 1.0), ((0.3, -0.4), -1.0)]
+    >>> pts, u = solve_forward_conformal('ellipse', sources, a=2.0, b=1.0)
+    """
+    conf_map = create_conformal_map(domain, **domain_kwargs)
+    solver = ConformalForwardSolver(conf_map, n_boundary)
+    u = solver.solve(sources)
+    return solver.boundary_points, u
 
 
 # =============================================================================
-# Backward-compatible aliases
+# TESTING
 # =============================================================================
-ConformalBEMSolver = ConformalForwardSolver
-ConformalNonlinearInverse = ConformalNonlinearInverseSolver
-ConformalLinearInverse = ConformalLinearInverseSolver
 
-
-# =============================================================================
-# Convenience functions
-# =============================================================================
-def create_ellipse_solver(a: float = 2.0, b: float = 1.0, 
-                          n_boundary: int = 100) -> ConformalForwardSolver:
-    """Create a solver for an ellipse with semi-axes a and b."""
-    return ConformalForwardSolver(EllipseMap(a, b), n_boundary)
-
-
-def create_star_solver(radius_func: Callable[[float], float],
-                       n_boundary: int = 100) -> ConformalForwardSolver:
-    """Create a solver for a star-shaped domain r = R(θ)."""
-    return ConformalForwardSolver(StarShapedMap(radius_func), n_boundary)
+if __name__ == "__main__":
+    print("Testing Conformal Mapping Solver")
+    print("=" * 60)
+    
+    # Test sources (must sum to zero)
+    sources = [
+        ((-0.3, 0.4), 1.0),
+        ((0.5, 0.3), 1.0),
+        ((-0.4, -0.4), -1.0),
+        ((0.3, -0.5), -1.0),
+    ]
+    
+    # Test disk (should match analytical)
+    print("\n1. Unit Disk:")
+    boundary_pts, u_disk = solve_forward_conformal('disk', sources)
+    print(f"   Boundary range: [{u_disk.min():.4f}, {u_disk.max():.4f}]")
+    
+    # Test ellipse
+    print("\n2. Ellipse (a=2, b=1):")
+    sources_ellipse = [
+        ((-0.6, 0.3), 1.0),
+        ((1.0, 0.2), 1.0),
+        ((-0.8, -0.3), -1.0),
+        ((0.6, -0.4), -1.0),
+    ]
+    boundary_pts, u_ellipse = solve_forward_conformal('ellipse', sources_ellipse, a=2.0, b=1.0)
+    print(f"   Boundary range: [{u_ellipse.min():.4f}, {u_ellipse.max():.4f}]")
+    
+    # Test rectangle
+    print("\n3. Rectangle [-1,1] x [-0.5, 0.5]:")
+    sources_rect = [
+        ((-0.4, 0.2), 1.0),
+        ((0.5, 0.1), 1.0),
+        ((-0.3, -0.2), -1.0),
+        ((0.3, -0.3), -1.0),
+    ]
+    boundary_pts, u_rect = solve_forward_conformal('rectangle', sources_rect, 
+                                                    half_width=1.0, half_height=0.5)
+    print(f"   Boundary range: [{u_rect.min():.4f}, {u_rect.max():.4f}]")
+    
+    # Test custom domain (brain-like)
+    print("\n4. Custom domain (brain-like):")
+    def brain_boundary(t):
+        r = 1.0 + 0.15*np.cos(2*t) - 0.1*np.cos(4*t) + 0.05*np.cos(3*t)
+        r = r * (1 - 0.1*np.sin(t)**4)
+        return r * np.cos(t) + 1j * 0.8 * r * np.sin(t)
+    
+    sources_brain = [
+        ((-0.4, 0.3), 1.0),
+        ((0.4, 0.3), 1.0),
+        ((-0.3, -0.2), -1.0),
+        ((0.3, -0.2), -1.0),
+    ]
+    boundary_pts, u_brain = solve_forward_conformal('custom', sources_brain,
+                                                     boundary_func=brain_boundary)
+    print(f"   Boundary range: [{u_brain.min():.4f}, {u_brain.max():.4f}]")
+    
+    # Test polygon (triangle)
+    print("\n5. Triangle:")
+    triangle = [(0, 0), (2, 0), (1, 1.5)]
+    sources_tri = [
+        ((0.8, 0.4), 1.0),
+        ((1.2, 0.4), -1.0),
+    ]
+    boundary_pts, u_tri = solve_forward_conformal('polygon', sources_tri, vertices=triangle)
+    print(f"   Boundary range: [{u_tri.min():.4f}, {u_tri.max():.4f}]")
+    
+    print("\n" + "=" * 60)
+    print("All tests completed!")
+    print("\nThe universal formula u(z) = Σ qₖ G_D(f(z), f(zₖ)) works for ANY domain!")

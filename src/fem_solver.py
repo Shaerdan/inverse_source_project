@@ -25,10 +25,12 @@ from dataclasses import dataclass
 # Import shared mesh utilities
 try:
     from .mesh import (create_disk_mesh, get_source_grid, create_polygon_mesh, 
-                       get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid)
+                       get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid,
+                       get_ellipse_sensor_locations, get_polygon_sensor_locations)
 except ImportError:
     from mesh import (create_disk_mesh, get_source_grid, create_polygon_mesh, 
-                      get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid)
+                      get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid,
+                      get_ellipse_sensor_locations, get_polygon_sensor_locations)
 
 
 # Check for DOLFINx availability
@@ -74,13 +76,37 @@ class InverseResult:
 # =============================================================================
 
 def find_containing_cell(nodes: np.ndarray, elements: np.ndarray, 
-                         point: np.ndarray) -> Tuple[int, np.ndarray]:
+                         point: np.ndarray, delaunay: 'Delaunay' = None) -> Tuple[int, np.ndarray]:
     """
     Find the mesh cell containing a point and compute barycentric coordinates.
-    Uses bounding box pre-check for speed.
+    
+    If delaunay is provided, uses fast O(log N) lookup.
+    Otherwise falls back to O(N) linear search.
     """
     x, y = point[0], point[1]
     
+    # Fast path: use Delaunay if available
+    if delaunay is not None:
+        simplex_idx = delaunay.find_simplex(point.reshape(1, 2))[0]
+        if simplex_idx >= 0:
+            # Get triangle vertices
+            cell = elements[simplex_idx]
+            v0, v1, v2 = nodes[cell[0]], nodes[cell[1]], nodes[cell[2]]
+            
+            # Compute barycentric coordinates
+            x1, y1 = v0
+            x2, y2 = v1
+            x3, y3 = v2
+            
+            det = (y2 - y3)*(x1 - x3) + (x3 - x2)*(y1 - y3)
+            if abs(det) > 1e-14:
+                lam1 = ((y2 - y3)*(x - x3) + (x3 - x2)*(y - y3)) / det
+                lam2 = ((y3 - y1)*(x - x3) + (x1 - x3)*(y - y3)) / det
+                lam3 = 1 - lam1 - lam2
+                return simplex_idx, np.array([lam1, lam2, lam3])
+        return -1, np.array([0, 0, 0])
+    
+    # Slow fallback: linear search
     for cell_idx, cell in enumerate(elements):
         # Get triangle vertices
         v0 = nodes[cell[0]]
@@ -154,13 +180,44 @@ def assemble_stiffness_matrix(nodes: np.ndarray, elements: np.ndarray) -> csr_ma
 
 
 def solve_poisson(nodes: np.ndarray, elements: np.ndarray,
-                  sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
+                  sources: List[Tuple[Tuple[float, float], float]],
+                  method: str = 'nullspace') -> np.ndarray:
     """
     Solve Poisson equation with point sources using FEM.
     
     -Δu = Σ qₖ δ(x - ξₖ)  in Ω
     ∂u/∂n = 0             on ∂Ω
+    
+    For Neumann problems, the solution is unique up to a constant.
+    We enforce uniqueness via null space projection (like Firedrake/PETSc).
+    
+    Parameters
+    ----------
+    nodes : array, shape (n_nodes, 2)
+    elements : array, shape (n_elements, 3)
+    sources : list of ((x, y), intensity) tuples
+    method : str
+        'nullspace' - Project RHS and solution (default, recommended)
+        'regularize' - Small diagonal perturbation only (legacy)
+        'saddle_point' - Augmented system with GMRES (slow but exact)
+    
+    Returns
+    -------
+    u : array, shape (n_nodes,)
+        Solution with zero mean
+        
+    Notes
+    -----
+    The 'nullspace' method mirrors Firedrake/PETSc's approach:
+        nullspace = VectorSpaceBasis(constant=True)
+        solve(a == L, nullspace=nullspace)
+    
+    It projects the RHS to be orthogonal to the null space (constants)
+    before solving, then projects the solution after solving.
     """
+    from scipy.sparse import bmat
+    from scipy.sparse.linalg import gmres
+    
     n_nodes = len(nodes)
     
     # Assemble stiffness matrix
@@ -182,13 +239,44 @@ def solve_poisson(nodes: np.ndarray, elements: np.ndarray,
             for i, node in enumerate(cell_nodes):
                 f[node] += q * bary[i]
     
-    # Regularize for Neumann problem
-    eps = 1e-10
-    K_reg = K + eps * diags([1.0] * n_nodes)
+    def project_nullspace(v):
+        """Project to be orthogonal to constants."""
+        return v - np.mean(v)
     
-    # Solve
-    u = spsolve(K_reg, f)
-    u = u - np.mean(u)  # Zero mean
+    if method == 'saddle_point':
+        # =====================================================================
+        # SADDLE-POINT with GMRES (exact but slower)
+        # =====================================================================
+        e = csr_matrix(np.ones((n_nodes, 1)))
+        zero = csr_matrix((1, 1))
+        A = bmat([[K, e], [e.T, zero]], format='csr')
+        b = np.concatenate([f, [0.0]])
+        x, info = gmres(A, b, atol=1e-12, rtol=1e-12)
+        u = x[:-1]
+        
+    elif method == 'nullspace':
+        # =====================================================================
+        # NULL SPACE PROJECTION (like Firedrake/PETSc, recommended)
+        # =====================================================================
+        # 1. Project RHS to range(K) - ensures compatibility
+        f = project_nullspace(f)
+        
+        # 2. Solve with small regularization for numerical stability
+        eps = 1e-10
+        K_reg = K + eps * diags([1.0] * n_nodes)
+        u = spsolve(K_reg, f)
+        
+        # 3. Project solution - ensures uniqueness
+        u = project_nullspace(u)
+        
+    else:  # 'regularize'
+        # =====================================================================
+        # REGULARIZATION ONLY (legacy)
+        # =====================================================================
+        eps = 1e-10
+        K_reg = K + eps * diags([1.0] * n_nodes)
+        u = spsolve(K_reg, f)
+        u = project_nullspace(u)
     
     return u
 
@@ -208,31 +296,68 @@ class FEMForwardSolver:
     ----------
     resolution : float
         Mesh element size (smaller = finer mesh). Default 0.1
+    n_sensors : int
+        Number of sensor locations on boundary. Default 100.
+    sensor_locations : array, optional
+        Custom sensor locations. If None, uses n_sensors evenly spaced.
     verbose : bool
         Print mesh info. Default True
     mesh_data : tuple, optional
-        Custom mesh (nodes, elements, boundary_indices, interior_indices).
+        Custom mesh (nodes, elements, boundary_indices, interior_indices, sensor_indices).
         If provided, resolution is ignored.
     """
     
-    def __init__(self, resolution: float = 0.1, verbose: bool = True,
+    def __init__(self, resolution: float = 0.1, n_sensors: int = 100,
+                 sensor_locations: np.ndarray = None, verbose: bool = True,
                  mesh_data: Tuple = None):
         self.resolution = resolution
         
-        # Use custom mesh if provided, otherwise create disk mesh
-        if mesh_data is not None:
-            self.nodes, self.elements, self.boundary_indices, self.interior_indices = mesh_data
-        else:
-            self.nodes, self.elements, self.boundary_indices, self.interior_indices = \
-                create_disk_mesh(resolution)
+        # Determine sensor locations
+        if sensor_locations is None:
+            try:
+                from .mesh import get_disk_sensor_locations
+            except ImportError:
+                from mesh import get_disk_sensor_locations
+            sensor_locations = get_disk_sensor_locations(n_sensors, radius=1.0)
         
-        # Boundary info (sorted by angle for interpolation)
+        self.sensor_locations = sensor_locations
+        self.n_sensors = len(sensor_locations)
+        
+        # Use custom mesh if provided, otherwise create disk mesh with sensors
+        if mesh_data is not None:
+            if len(mesh_data) >= 5:
+                self.nodes, self.elements, self.boundary_indices, self.interior_indices, self.sensor_indices = mesh_data
+            else:
+                self.nodes, self.elements, self.boundary_indices, self.interior_indices = mesh_data[:4]
+                # Find sensor indices in the mesh
+                self.sensor_indices = self._find_sensor_indices(sensor_locations)
+        else:
+            result = create_disk_mesh(resolution, sensor_locations=sensor_locations)
+            self.nodes, self.elements, self.boundary_indices, self.interior_indices, self.sensor_indices = result
+        
+        # Store theta for reference (don't reorder sensor_indices!)
+        sensor_points = self.nodes[self.sensor_indices]
+        self.theta = np.arctan2(sensor_points[:, 1], sensor_points[:, 0])
+        
+        # Also sort boundary indices
         boundary_points = self.nodes[self.boundary_indices]
-        self.theta = np.arctan2(boundary_points[:, 1], boundary_points[:, 0])
-        sort_idx = np.argsort(self.theta)
-        self.theta = self.theta[sort_idx]
-        self.boundary_indices = self.boundary_indices[sort_idx]
+        boundary_theta = np.arctan2(boundary_points[:, 1], boundary_points[:, 0])
+        boundary_sort = np.argsort(boundary_theta)
+        self.boundary_indices = self.boundary_indices[boundary_sort]
         self.n_boundary = len(self.boundary_indices)
+        
+        # Pre-compute element centroids and KDTree for fast cell lookup
+        from scipy.spatial import cKDTree
+        self._element_centroids = np.array([
+            self.nodes[el].mean(axis=0) for el in self.elements
+        ])
+        self._centroid_tree = cKDTree(self._element_centroids)
+        
+        # Build node-to-elements adjacency for fast lookup
+        self._node_to_elements = [[] for _ in range(len(self.nodes))]
+        for el_idx, el in enumerate(self.elements):
+            for node in el:
+                self._node_to_elements[node].append(el_idx)
         
         # Pre-assemble and cache stiffness matrix (only depends on mesh!)
         self._K = None
@@ -241,7 +366,30 @@ class FEMForwardSolver:
         
         if verbose:
             print(f"FEM mesh: {len(self.nodes)} nodes, {len(self.elements)} elements, "
-                  f"{self.n_boundary} boundary points")
+                  f"{self.n_sensors} sensors")
+    
+    def _find_sensor_indices(self, sensor_locations: np.ndarray) -> np.ndarray:
+        """Find mesh node indices closest to sensor locations."""
+        sensor_indices = np.zeros(len(sensor_locations), dtype=int)
+        for i, (sx, sy) in enumerate(sensor_locations):
+            dists = np.sqrt((self.nodes[:, 0] - sx)**2 + (self.nodes[:, 1] - sy)**2)
+            sensor_indices[i] = np.argmin(dists)
+        return sensor_indices
+    
+    def get_mesh_data(self) -> dict:
+        """
+        Export mesh data for saving.
+        
+        Returns
+        -------
+        dict with keys: nodes, elements, boundary_indices, interior_indices
+        """
+        return {
+            'nodes': self.nodes.copy(),
+            'elements': self.elements.copy(),
+            'boundary_indices': self.boundary_indices.copy(),
+            'interior_indices': self.interior_indices.copy() if hasattr(self, 'interior_indices') else np.array([]),
+        }
     
     @classmethod
     def from_polygon(cls, vertices: List[Tuple[float, float]], resolution: float = 0.1,
@@ -276,16 +424,62 @@ class FEMForwardSolver:
         return cls(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
     
     def _assemble_stiffness(self):
-        """Assemble stiffness matrix once (only depends on mesh geometry)."""
+        """Assemble stiffness matrix for Neumann problem.
+        
+        For the Neumann problem -Δu = f with ∂u/∂n = 0, the solution is unique 
+        only up to a constant. We handle this via small regularization:
+        
+            (K + εI)u = f
+        
+        For compatible data (∫f = 0, which holds when sources sum to zero),
+        this produces the same unique zero-mean solution as:
+        - Saddle-point with Lagrange multiplier (exact but unstable with direct solvers)
+        - Projection onto range(K)
+        
+        The regularization shifts the null eigenvalue from 0 to ε, making the
+        system invertible. With ε = 1e-10, the perturbation is negligible
+        (verified: produces same accuracy as GMRES saddle-point).
+        
+        After solving, we center the solution (u = u - mean(u)) to ensure
+        the zero-mean normalization.
+        
+        OPTIMIZATION: Pre-compute LU factorization for fast repeated solves.
+        """
+        from scipy.sparse.linalg import splu
+        
         self._K = assemble_stiffness_matrix(self.nodes, self.elements)
-        # Pre-compute regularized version for Neumann problem
         n_nodes = len(self.nodes)
         eps = 1e-10
         self._K_reg = self._K + eps * diags([1.0] * n_nodes)
+        
+        # Pre-compute LU factorization (MAJOR speedup for nonlinear inverse!)
+        # splu requires CSC format
+        self._K_lu = splu(self._K_reg.tocsc())
+        
+        # Store null space basis (normalized constant vector)
+        self._nullspace = np.ones(n_nodes) / np.sqrt(n_nodes)
+    
+    def _project_nullspace(self, v: np.ndarray) -> np.ndarray:
+        """Project vector to be orthogonal to null space (constants).
+        
+        This is equivalent to what Firedrake/PETSc does with:
+            nullspace = VectorSpaceBasis(constant=True)
+            
+        For null space spanned by e = [1,1,...,1]/√n:
+            v_projected = v - (v·e)e = v - mean(v)*ones
+        """
+        return v - np.mean(v)
     
     def solve(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
         """
-        Compute boundary values for given sources.
+        Compute solution at sensor locations for given sources.
+        
+        Uses null space projection (like Firedrake/PETSc):
+        1. Project RHS to range(K): f̃ = f - mean(f)
+        2. Solve (K + εI)u = f̃
+        3. Project solution: ũ = u - mean(u)
+        
+        This ensures both compatibility and uniqueness.
         
         Parameters
         ----------
@@ -294,8 +488,8 @@ class FEMForwardSolver:
             
         Returns
         -------
-        u_boundary : array
-            Solution values at boundary points
+        u_sensors : array, shape (n_sensors,)
+            Solution values at sensor locations (zero mean)
         """
         total_q = sum(q for _, q in sources)
         if abs(total_q) > 1e-10:
@@ -304,20 +498,80 @@ class FEMForwardSolver:
         # Build RHS (this changes with source positions)
         f = self._build_rhs(sources)
         
-        # Solve using cached stiffness matrix
-        u = spsolve(self._K_reg, f)
-        u = u - np.mean(u)
+        # Project RHS to be orthogonal to null space (ensures compatibility)
+        f = self._project_nullspace(f)
         
-        return u[self.boundary_indices] - np.mean(u[self.boundary_indices])
+        # Solve using pre-factored stiffness matrix (fast!)
+        u = self._K_lu.solve(f)
+        
+        # Project solution to be orthogonal to null space (ensures uniqueness)
+        u = self._project_nullspace(u)
+        
+        # Return solution at SENSOR locations (fixed measurement points)
+        u_sensors = u[self.sensor_indices]
+        return self._project_nullspace(u_sensors)
+    
+    def solve_at_boundary(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
+        """
+        Compute solution at ALL boundary nodes (for backwards compatibility).
+        
+        Parameters
+        ----------
+        sources : list of ((x, y), q) tuples
+            Point sources
+            
+        Returns
+        -------
+        u_boundary : array, shape (n_boundary,)
+            Solution values at all boundary nodes
+        """
+        f = self._build_rhs(sources)
+        f = self._project_nullspace(f)
+        u = self._K_lu.solve(f)
+        u = self._project_nullspace(u)
+        return self._project_nullspace(u[self.boundary_indices])
     
     def _build_rhs(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
-        """Build RHS vector using barycentric interpolation."""
+        """Build RHS vector using barycentric interpolation with fast cell lookup."""
         n_nodes = len(self.nodes)
         f = np.zeros(n_nodes)
         
         for (xi_x, xi_y), q in sources:
-            cell_idx, bary = find_containing_cell(self.nodes, self.elements, 
-                                                   np.array([xi_x, xi_y]))
+            point = np.array([xi_x, xi_y])
+            
+            # Fast lookup: find nearest centroid, check that element + neighbors
+            _, nearest_centroid_idx = self._centroid_tree.query(point, k=1)
+            
+            cell_idx = -1
+            bary = None
+            
+            # Check the nearest element first
+            candidates = [nearest_centroid_idx]
+            # Also check elements sharing nodes with the nearest element
+            for node in self.elements[nearest_centroid_idx]:
+                candidates.extend(self._node_to_elements[node])
+            
+            for candidate_idx in candidates:
+                cell = self.elements[candidate_idx]
+                v0, v1, v2 = self.nodes[cell[0]], self.nodes[cell[1]], self.nodes[cell[2]]
+                
+                # Compute barycentric coordinates
+                x1, y1 = v0
+                x2, y2 = v1
+                x3, y3 = v2
+                
+                det = (y2 - y3)*(x1 - x3) + (x3 - x2)*(y1 - y3)
+                if abs(det) < 1e-14:
+                    continue
+                
+                lam1 = ((y2 - y3)*(xi_x - x3) + (x3 - x2)*(xi_y - y3)) / det
+                lam2 = ((y3 - y1)*(xi_x - x3) + (x1 - x3)*(xi_y - y3)) / det
+                lam3 = 1 - lam1 - lam2
+                
+                if lam1 >= -1e-10 and lam2 >= -1e-10 and lam3 >= -1e-10:
+                    cell_idx = candidate_idx
+                    bary = np.array([lam1, lam2, lam3])
+                    break
             
             if cell_idx < 0:
                 # Fallback: snap to nearest node
@@ -335,8 +589,9 @@ class FEMForwardSolver:
     def solve_full(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
         """Return solution at all mesh nodes."""
         f = self._build_rhs(sources)
-        u = spsolve(self._K_reg, f)
-        return u - np.mean(u)
+        f = self._project_nullspace(f)
+        u = self._K_lu.solve(f)
+        return self._project_nullspace(u)
 
 
 # =============================================================================
@@ -356,58 +611,139 @@ class FEMLinearInverseSolver:
         Mesh resolution for FEM forward solves
     source_resolution : float
         Mesh resolution for source candidate grid (can be coarser)
+    n_sensors : int
+        Number of sensor/measurement locations on boundary. Default 100.
     verbose : bool
         Print info. Default True
     mesh_data : tuple, optional
-        Custom mesh (nodes, elements, boundary_indices, interior_indices)
+        Custom mesh (nodes, elements, boundary_indices, interior_indices, sensor_indices)
     source_grid : array, optional
         Custom source candidate grid (N, 2) array
+    sensor_locations : array, optional
+        Custom sensor locations (M, 2) array. If None, uses n_sensors evenly spaced.
     """
     
     def __init__(self, forward_resolution: float = 0.1, source_resolution: float = 0.15,
-                 verbose: bool = True, mesh_data: Tuple = None, source_grid: np.ndarray = None):
-        # Use custom mesh if provided
+                 n_sensors: int = 100, verbose: bool = True, 
+                 mesh_data: Tuple = None, source_grid: np.ndarray = None,
+                 sensor_locations: np.ndarray = None):
+        
+        # Determine sensor locations
+        if sensor_locations is None:
+            # Default: evenly spaced on unit circle
+            try:
+                from .mesh import get_disk_sensor_locations
+            except ImportError:
+                from mesh import get_disk_sensor_locations
+            sensor_locations = get_disk_sensor_locations(n_sensors, radius=1.0)
+        
+        self.sensor_locations = sensor_locations
+        self.n_sensors = len(sensor_locations)
+        
+        # Use custom mesh if provided (must include sensor points)
         if mesh_data is not None:
-            self.nodes, self.elements, self.boundary_indices, interior_indices = mesh_data
+            if len(mesh_data) >= 5:
+                self.nodes, self.elements, self.boundary_indices, interior_indices, self.sensor_indices = mesh_data
+            else:
+                # Old-style mesh_data without sensor indices - find them
+                self.nodes, self.elements, self.boundary_indices, interior_indices = mesh_data[:4]
+                self.sensor_indices = self._find_sensor_indices(sensor_locations)
         else:
-            self.nodes, self.elements, self.boundary_indices, interior_indices = \
-                create_disk_mesh(forward_resolution)
+            # Create mesh with sensor locations as required boundary points
+            result = create_disk_mesh(forward_resolution,
+                                      sensor_locations=sensor_locations)
+            self.nodes, self.elements, self.boundary_indices, interior_indices, self.sensor_indices = result
         
         # Pre-assemble stiffness matrix for forward solves
+        # Uses regularization (K + εI) for numerical stability with direct solvers.
+        # Combined with null space projection, this is mathematically equivalent
+        # to the saddle-point formulation used in Firedrake/PETSc.
+        from scipy.sparse.linalg import splu
+        
         self._K = assemble_stiffness_matrix(self.nodes, self.elements)
         n_nodes = len(self.nodes)
         self._K_reg = self._K + 1e-10 * diags([1.0] * n_nodes)
         
-        # Source candidate grid
+        # Pre-compute LU factorization for fast Green's matrix building
+        self._K_lu = splu(self._K_reg.tocsc())
+        
+        # Store null space basis for projection (like Firedrake's VectorSpaceBasis)
+        self._nullspace = np.ones(n_nodes) / np.sqrt(n_nodes)
+        
+        # Source candidate grid - use interior nodes from gmsh mesh (no margin filtering)
         if source_grid is not None:
             self.interior_points = source_grid
         else:
-            # Default: use interior of mesh
-            source_nodes, _, _, source_interior = create_disk_mesh(source_resolution)
+            # Use interior nodes of a gmsh mesh at source_resolution
+            result = create_disk_mesh(source_resolution)
+            source_nodes = result[0]
+            source_interior = result[3]
             self.interior_points = source_nodes[source_interior]
-            # Filter to r < 0.9 to stay well inside domain
-            radii = np.sqrt(self.interior_points[:, 0]**2 + self.interior_points[:, 1]**2)
-            mask = radii < 0.9
-            self.interior_points = self.interior_points[mask]
         
         self.n_interior = len(self.interior_points)
         
-        # Sort boundary by angle
+        # Store theta for reference (don't reorder sensor_indices!)
+        sensor_points = self.nodes[self.sensor_indices]
+        self.theta = np.arctan2(sensor_points[:, 1], sensor_points[:, 0])
+        
+        # Also keep boundary indices for full boundary operations if needed
         boundary_points = self.nodes[self.boundary_indices]
-        theta = np.arctan2(boundary_points[:, 1], boundary_points[:, 0])
-        sort_idx = np.argsort(theta)
-        self.boundary_indices = self.boundary_indices[sort_idx]
-        self.theta = theta[sort_idx]
+        boundary_theta = np.arctan2(boundary_points[:, 1], boundary_points[:, 0])
+        boundary_sort = np.argsort(boundary_theta)
+        self.boundary_indices = self.boundary_indices[boundary_sort]
         self.n_boundary = len(self.boundary_indices)
         
         self.G = None
         
         if verbose:
-            print(f"FEM Linear: {self.n_boundary} boundary, {self.n_interior} source candidates")
+            print(f"FEM Linear: {self.n_sensors} sensors, {self.n_interior} source candidates")
+    
+    def _project_nullspace(self, v: np.ndarray) -> np.ndarray:
+        """Project vector to be orthogonal to null space (constants).
+        
+        This mirrors Firedrake/PETSc's nullspace handling:
+            nullspace = VectorSpaceBasis(constant=True)
+        """
+        return v - np.mean(v)
+    
+    def _find_sensor_indices(self, sensor_locations: np.ndarray) -> np.ndarray:
+        """Find mesh node indices closest to sensor locations."""
+        sensor_indices = np.zeros(len(sensor_locations), dtype=int)
+        for i, (sx, sy) in enumerate(sensor_locations):
+            dists = np.sqrt((self.nodes[:, 0] - sx)**2 + (self.nodes[:, 1] - sy)**2)
+            sensor_indices[i] = np.argmin(dists)
+        return sensor_indices
+    
+    def get_mesh_data(self) -> dict:
+        """
+        Export forward mesh data for saving.
+        
+        Returns
+        -------
+        dict with keys: nodes, elements, boundary_indices, interior_indices
+        """
+        return {
+            'nodes': self.nodes.copy(),
+            'elements': self.elements.copy(),
+            'boundary_indices': self.boundary_indices.copy(),
+            'interior_indices': np.array([i for i in range(len(self.nodes)) 
+                                          if i not in self.boundary_indices]),
+        }
+    
+    def get_source_grid(self) -> np.ndarray:
+        """
+        Export source grid (interior points) for saving.
+        
+        Returns
+        -------
+        np.ndarray : Source grid points (n_points, 2)
+        """
+        return self.interior_points.copy()
     
     @classmethod
     def from_polygon(cls, vertices: List[Tuple[float, float]], 
                      forward_resolution: float = 0.1, source_resolution: float = 0.15,
+                     sensor_locations: np.ndarray = None, n_sensors: int = 100,
                      verbose: bool = True) -> 'FEMLinearInverseSolver':
         """
         Create solver for polygon domain.
@@ -416,15 +752,26 @@ class FEMLinearInverseSolver:
         ----------
         vertices : list of (x, y)
             Polygon vertices in order (CCW)
+        sensor_locations : array, optional
+            Explicit sensor locations. If None, generates n_sensors on boundary.
+        n_sensors : int
+            Number of sensors if sensor_locations not provided
         """
-        mesh_data = create_polygon_mesh(vertices, forward_resolution)
-        source_grid = get_polygon_source_grid(vertices, source_resolution, margin=0.1)
+        # Get or generate sensor locations
+        if sensor_locations is None:
+            sensor_locations = get_polygon_sensor_locations(vertices, n_sensors)
+        
+        # Create mesh WITH sensors embedded
+        mesh_data = create_polygon_mesh(vertices, forward_resolution, sensor_locations=sensor_locations)
+        source_grid = get_polygon_source_grid(vertices, source_resolution)
         return cls(forward_resolution=forward_resolution, source_resolution=source_resolution,
-                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid)
+                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid,
+                   sensor_locations=sensor_locations)
     
     @classmethod
     def from_ellipse(cls, a: float, b: float,
                      forward_resolution: float = 0.1, source_resolution: float = 0.15,
+                     sensor_locations: np.ndarray = None, n_sensors: int = 100,
                      verbose: bool = True) -> 'FEMLinearInverseSolver':
         """
         Create solver for ellipse domain.
@@ -433,24 +780,39 @@ class FEMLinearInverseSolver:
         ----------
         a, b : float
             Semi-axes of ellipse
+        sensor_locations : array, optional
+            Explicit sensor locations. If None, generates n_sensors on boundary.
+        n_sensors : int
+            Number of sensors if sensor_locations not provided
         """
-        mesh_data = create_ellipse_mesh(a, b, forward_resolution)
-        source_grid = get_ellipse_source_grid(a, b, source_resolution, margin=0.1)
+        # Get or generate sensor locations
+        if sensor_locations is None:
+            sensor_locations = get_ellipse_sensor_locations(a, b, n_sensors)
+        
+        # Create mesh WITH sensors embedded
+        mesh_data = create_ellipse_mesh(a, b, forward_resolution, sensor_locations=sensor_locations)
+        source_grid = get_ellipse_source_grid(a, b, source_resolution)
         return cls(forward_resolution=forward_resolution, source_resolution=source_resolution,
-                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid)
+                   verbose=verbose, mesh_data=mesh_data, source_grid=source_grid,
+                   sensor_locations=sensor_locations)
     
     def build_greens_matrix(self, verbose: bool = True):
         """
         Build the Green's matrix by solving N forward problems.
         
-        G[i, j] = u(boundary_point_i) when unit source at interior_point_j
+        G[i, j] = u(sensor_i) when unit source at interior_point_j
         
-        Uses cached stiffness matrix for speed.
+        Uses null space projection (like Firedrake/PETSc):
+        1. Project RHS to range(K)
+        2. Solve (K + εI)u = f
+        3. Project solution orthogonal to kernel
+        
+        This ensures the unique zero-mean solution for each column.
         """
         if verbose:
-            print(f"Building FEM Green's matrix ({self.n_boundary} x {self.n_interior})...")
+            print(f"Building FEM Green's matrix ({self.n_sensors} x {self.n_interior})...")
         
-        self.G = np.zeros((self.n_boundary, self.n_interior))
+        self.G = np.zeros((self.n_sensors, self.n_interior))
         
         for j in range(self.n_interior):
             if verbose and j % 50 == 0:
@@ -475,11 +837,19 @@ class FEMLinearInverseSolver:
                     for i, node in enumerate(cell_nodes):
                         f[node] += q * bary[i]
             
-            # Solve with cached matrix
-            u = spsolve(self._K_reg, f)
-            u = u - np.mean(u)
-            self.G[:, j] = u[self.boundary_indices]
+            # Project RHS to range(K) - ensures compatibility
+            f = self._project_nullspace(f)
+            
+            # Solve with pre-factored stiffness matrix (fast!)
+            u = self._K_lu.solve(f)
+            
+            # Project solution orthogonal to kernel - ensures uniqueness
+            u = self._project_nullspace(u)
+            
+            # Extract solution at SENSOR locations (not all boundary nodes)
+            self.G[:, j] = u[self.sensor_indices]
         
+        # Final projection on columns (redundant but explicit)
         self.G = self.G - np.mean(self.G, axis=0, keepdims=True)
         if verbose:
             print("Done.")
@@ -619,14 +989,21 @@ class FEMNonlinearInverseSolver:
         Custom mesh (nodes, elements, boundary_indices, interior_indices)
     bounds : tuple, optional
         Custom bounds for source positions ((x_min, x_max), (y_min, y_max))
+    domain_type : str, optional
+        'disk', 'ellipse', 'polygon'. Default 'disk'.
+    domain_params : dict, optional
+        Domain parameters (e.g., vertices for polygon, a/b for ellipse)
     """
     
     def __init__(self, n_sources: int, resolution: float = 0.1, verbose: bool = False,
-                 mesh_data: Tuple = None, bounds: Tuple = None):
+                 mesh_data: Tuple = None, bounds: Tuple = None,
+                 domain_type: str = 'disk', domain_params: dict = None):
         self.n_sources = n_sources
         self.forward = FEMForwardSolver(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
         self.u_measured = None
         self.history = []
+        self.domain_type = domain_type
+        self.domain_params = domain_params or {}
         
         # Default bounds for unit disk
         if bounds is None:
@@ -636,9 +1013,25 @@ class FEMNonlinearInverseSolver:
             self.x_bounds = bounds[0]
             self.y_bounds = bounds[1]
     
+    @staticmethod
+    def _point_in_polygon(x: float, y: float, vertices: List[Tuple[float, float]]) -> bool:
+        """Ray casting algorithm for point-in-polygon test."""
+        n = len(vertices)
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = vertices[i]
+            xj, yj = vertices[j]
+            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+        return inside
+    
     @classmethod
     def from_polygon(cls, vertices: List[Tuple[float, float]], n_sources: int,
-                     resolution: float = 0.1, verbose: bool = False) -> 'FEMNonlinearInverseSolver':
+                     resolution: float = 0.1, n_sensors: int = 100,
+                     verbose: bool = False, sensor_locations: np.ndarray = None,
+                     mesh_data: Tuple = None) -> 'FEMNonlinearInverseSolver':
         """
         Create solver for polygon domain.
         
@@ -648,22 +1041,70 @@ class FEMNonlinearInverseSolver:
             Polygon vertices in order (CCW)
         n_sources : int
             Number of sources to recover
+        resolution : float
+            Mesh resolution
+        n_sensors : int
+            Number of boundary sensors
+        sensor_locations : array, optional
+            Explicit sensor locations. If provided, n_sensors is ignored.
+        mesh_data : tuple, optional
+            Pre-built mesh data to reuse.
         """
-        mesh_data = create_polygon_mesh(vertices, resolution)
+        vertices_arr = np.array(vertices)
+        n_vertices = len(vertices)
+        
+        # Use provided sensor locations or generate them
+        if sensor_locations is None:
+            # Generate sensor locations evenly distributed on polygon boundary
+            # Compute edge lengths
+            edges = np.diff(np.vstack([vertices_arr, vertices_arr[0:1]]), axis=0)
+            edge_lengths = np.linalg.norm(edges, axis=1)
+            total_length = np.sum(edge_lengths)
+            
+            # Distribute sensors proportionally along edges
+            sensor_locations = []
+            cumulative = 0
+            sensor_spacing = total_length / n_sensors
+            
+            for i in range(n_vertices):
+                v_start = vertices_arr[i]
+                v_end = vertices_arr[(i + 1) % n_vertices]
+                edge_len = edge_lengths[i]
+                
+                # Add sensors along this edge
+                t = 0
+                while cumulative + t * edge_len < len(sensor_locations) * sensor_spacing + sensor_spacing:
+                    t_next = ((len(sensor_locations) + 1) * sensor_spacing - cumulative) / edge_len
+                    if t_next <= 1:
+                        pt = v_start + t_next * (v_end - v_start)
+                        sensor_locations.append(pt)
+                    else:
+                        break
+                cumulative += edge_len
+            
+            sensor_locations = np.array(sensor_locations[:n_sensors])
+        else:
+            sensor_locations = np.asarray(sensor_locations)
+        
+        # Create or reuse mesh
+        if mesh_data is None:
+            mesh_data = create_polygon_mesh(vertices, resolution, sensor_locations=sensor_locations)
         
         # Compute bounds from vertices
-        vertices_arr = np.array(vertices)
         x_min, y_min = vertices_arr.min(axis=0)
         x_max, y_max = vertices_arr.max(axis=0)
         margin = 0.1 * min(x_max - x_min, y_max - y_min)
         bounds = ((x_min + margin, x_max - margin), (y_min + margin, y_max - margin))
         
         return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
-                   mesh_data=mesh_data, bounds=bounds)
+                   mesh_data=mesh_data, bounds=bounds,
+                   domain_type='polygon', domain_params={'vertices': vertices})
     
     @classmethod
     def from_ellipse(cls, a: float, b: float, n_sources: int,
-                     resolution: float = 0.1, verbose: bool = False) -> 'FEMNonlinearInverseSolver':
+                     resolution: float = 0.1, n_sensors: int = 100,
+                     verbose: bool = False, sensor_locations: np.ndarray = None,
+                     mesh_data: Tuple = None) -> 'FEMNonlinearInverseSolver':
         """
         Create solver for ellipse domain.
         
@@ -673,11 +1114,27 @@ class FEMNonlinearInverseSolver:
             Semi-axes of ellipse
         n_sources : int
             Number of sources to recover
+        resolution : float
+            Mesh resolution
+        n_sensors : int
+            Number of boundary sensors
+        sensor_locations : array, optional
+            Explicit sensor locations. If provided, n_sensors is ignored.
+        mesh_data : tuple, optional
+            Pre-built mesh data to reuse.
         """
-        mesh_data = create_ellipse_mesh(a, b, resolution)
+        # Use provided sensor locations or generate them
+        if sensor_locations is None:
+            theta = np.linspace(0, 2*np.pi, n_sensors, endpoint=False)
+            sensor_locations = np.column_stack([a * np.cos(theta), b * np.sin(theta)])
+        
+        # Create mesh with sensors embedded or reuse provided mesh
+        if mesh_data is None:
+            mesh_data = create_ellipse_mesh(a, b, resolution, sensor_locations=sensor_locations)
         bounds = ((-0.85*a, 0.85*a), (-0.85*b, 0.85*b))
         return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
-                   mesh_data=mesh_data, bounds=bounds)
+                   mesh_data=mesh_data, bounds=bounds,
+                   domain_type='ellipse', domain_params={'a': a, 'b': b})
     
     def set_measured_data(self, u_measured: np.ndarray):
         """Set the measured boundary data."""
@@ -706,8 +1163,18 @@ class FEMNonlinearInverseSolver:
         
         # Penalty for sources outside domain
         for (x, y), _ in sources:
-            if x**2 + y**2 >= 0.85**2:
-                return 1e10
+            if self.domain_type == 'polygon':
+                vertices = self.domain_params.get('vertices', [])
+                if vertices and not self._point_in_polygon(x, y, vertices):
+                    return 1e10
+            elif self.domain_type == 'ellipse':
+                a = self.domain_params.get('a', 1.0)
+                b = self.domain_params.get('b', 1.0)
+                if (x/a)**2 + (y/b)**2 >= 0.85**2:
+                    return 1e10
+            else:  # disk
+                if x**2 + y**2 >= 0.85**2:
+                    return 1e10
         
         u_computed = self.forward.solve(sources)
         
@@ -791,23 +1258,48 @@ class FEMNonlinearInverseSolver:
         )
     
     def _get_initial_guess(self, init_from: str, seed: int) -> list:
-        """Generate initial guess for optimization."""
+        """Generate initial guess for optimization.
+        
+        For non-disk domains, uses interior mesh points or domain centroid
+        to ensure initial guesses are valid.
+        """
         n = self.n_sources
         x0 = []
+        
+        # Get domain bounds
+        x_min, x_max = self.x_bounds
+        y_min, y_max = self.y_bounds
+        
+        # Compute domain centroid and safe radius
+        cx = (x_min + x_max) / 2
+        cy = (y_min + y_max) / 2
+        
+        # Safe radius is half the smaller dimension, shrunk by 0.6
+        safe_r = min(x_max - cx, y_max - cy) * 0.6
         
         if init_from == 'random' or seed > 0:
             np.random.seed(42 + seed)
             for i in range(n):
-                r = 0.3 + 0.4 * np.random.rand()
+                # Use random angle and safe radius relative to domain centroid
+                r = safe_r * (0.3 + 0.5 * np.random.rand())  # r in [0.3*safe_r, 0.8*safe_r]
                 angle = 2 * np.pi * np.random.rand()
-                x0.extend([r * np.cos(angle), r * np.sin(angle)])
+                x = cx + r * np.cos(angle)
+                y = cy + r * np.sin(angle)
+                
+                # Clamp to bounds
+                x = np.clip(x, x_min * 0.9, x_max * 0.9)
+                y = np.clip(y, y_min * 0.9, y_max * 0.9)
+                
+                x0.extend([x, y])
                 if i < n - 1:
                     x0.append(np.random.randn())
         else:
-            # Circle initialization
+            # Circle initialization around centroid
             for i in range(n):
                 angle = 2 * np.pi * i / n
-                x0.extend([0.4 * np.cos(angle), 0.4 * np.sin(angle)])
+                x = cx + safe_r * 0.5 * np.cos(angle)
+                y = cy + safe_r * 0.5 * np.sin(angle)
+                x0.extend([x, y])
                 if i < n - 1:
                     x0.append(1.0 if i % 2 == 0 else -1.0)
         

@@ -78,13 +78,14 @@ def greens_function_disk_neumann(x: np.ndarray, xi: np.ndarray) -> np.ndarray:
     """
     Exact Neumann Green's function for the unit disk.
     
-    This is the closed-form solution derived using the method of images.
-    For a source at ξ inside the unit disk, place an image source at
-    ξ* = ξ/|ξ|² (outside the disk) with the SAME sign to satisfy ∂G/∂n = const.
+    For the PDE: -Δu = δ(x - ξ), the fundamental solution is Φ = -1/(2π) log|x-ξ|.
+    This is POSITIVE near the source (since log(small r) < 0).
+    
+    Using the method of images for Neumann BC, the Green's function is:
     
     G(x, ξ) = -1/(2π) [ln|x - ξ| + ln|x - ξ*| - ln|ξ|]
     
-    On the boundary |x| = 1, this simplifies using |x - ξ*| = |x - ξ|/|ξ|.
+    where ξ* = ξ/|ξ|² is the image point (Kelvin transform).
     
     Parameters
     ----------
@@ -96,14 +97,7 @@ def greens_function_disk_neumann(x: np.ndarray, xi: np.ndarray) -> np.ndarray:
     Returns
     -------
     G : array, shape (n,) or scalar
-        Green's function values
-        
-    Notes
-    -----
-    This Green's function satisfies:
-    - ΔG = -δ(x - ξ)  inside the disk
-    - ∂G/∂n = -1/(2π) = constant on the boundary
-    - ∫_∂Ω ∂G/∂n ds = -1 (integrates to source strength)
+        Green's function values (POSITIVE near source)
     """
     x = np.atleast_2d(x)
     xi = np.asarray(xi).flatten()
@@ -117,7 +111,7 @@ def greens_function_disk_neumann(x: np.ndarray, xi: np.ndarray) -> np.ndarray:
     xi_norm_sq = xi[0]**2 + xi[1]**2
     
     if xi_norm_sq < 1e-14:
-        # Source at origin - no image needed (or image at infinity)
+        # Source at origin - no image needed
         G = -1/(2*np.pi) * np.log(r)
     else:
         # Image point via Kelvin reflection
@@ -165,7 +159,7 @@ def greens_function_disk_neumann_gradient(x: np.ndarray, xi: np.ndarray) -> np.n
     dlogr_dxi = np.column_stack([dx / r_sq, dy / r_sq])  # Note: positive because ∂/∂ξ of (x-ξ)
     
     if xi_norm_sq < 1e-14:
-        dG_dxi = (1/(2*np.pi)) * dlogr_dxi
+        dG_dxi = (-1/(2*np.pi)) * dlogr_dxi
     else:
         # Image point
         xi_star = xi / xi_norm_sq
@@ -185,7 +179,7 @@ def greens_function_disk_neumann_gradient(x: np.ndarray, xi: np.ndarray) -> np.n
         # ∂ln|ξ|/∂ξ = ξ/|ξ|²
         dlog_xi_dxi = xi / xi_norm_sq
         
-        dG_dxi = (1/(2*np.pi)) * (dlogr_dxi + dlogr_star_dxi - dlog_xi_dxi)
+        dG_dxi = (-1/(2*np.pi)) * (dlogr_dxi + dlogr_star_dxi - dlog_xi_dxi)
     
     return dG_dxi
 
@@ -200,7 +194,10 @@ class AnalyticalForwardSolver:
     Parameters
     ----------
     n_boundary_points : int
-        Number of points on the boundary where solution is evaluated
+        Number of sensor/measurement points on the boundary.
+        These are the fixed physical locations where we measure.
+    sensor_locations : array, optional
+        Custom sensor locations. If None, uses evenly spaced points.
         
     Examples
     --------
@@ -209,14 +206,23 @@ class AnalyticalForwardSolver:
     >>> u = solver.solve(sources)
     """
     
-    def __init__(self, n_boundary_points: int = 100):
-        self.n_boundary = n_boundary_points
-        self.theta = np.linspace(0, 2*np.pi, n_boundary_points, endpoint=False)
-        self.boundary_points = np.column_stack([np.cos(self.theta), np.sin(self.theta)])
+    def __init__(self, n_boundary_points: int = 100, sensor_locations: np.ndarray = None):
+        if sensor_locations is not None:
+            self.sensor_locations = np.asarray(sensor_locations)
+            self.n_sensors = len(self.sensor_locations)
+        else:
+            self.n_sensors = n_boundary_points
+            theta = np.linspace(0, 2*np.pi, n_boundary_points, endpoint=False)
+            self.sensor_locations = np.column_stack([np.cos(theta), np.sin(theta)])
+        
+        # For backward compatibility
+        self.n_boundary = self.n_sensors
+        self.boundary_points = self.sensor_locations
+        self.theta = np.arctan2(self.sensor_locations[:, 1], self.sensor_locations[:, 0])
     
     def solve(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
         """
-        Compute boundary values for given point sources.
+        Compute solution at sensor locations for given point sources.
         
         Parameters
         ----------
@@ -225,21 +231,21 @@ class AnalyticalForwardSolver:
             
         Returns
         -------
-        u : array, shape (n_boundary,)
-            Solution values on the boundary (mean-centered)
+        u : array, shape (n_sensors,)
+            Solution values at sensor locations (mean-centered)
         """
         # Check compatibility condition
         total_q = sum(q for _, q in sources)
         if abs(total_q) > 1e-10:
             print(f"Warning: Σqₖ = {total_q:.6e} ≠ 0 (compatibility condition violated)")
         
-        u = np.zeros(self.n_boundary)
+        u = np.zeros(self.n_sensors)
         for (xi_x, xi_y), q in sources:
             xi = np.array([xi_x, xi_y])
             if xi_x**2 + xi_y**2 >= 1.0:
                 print(f"Warning: Source at ({xi_x:.3f}, {xi_y:.3f}) is outside or on boundary")
                 continue
-            u += q * greens_function_disk_neumann(self.boundary_points, xi)
+            u += q * greens_function_disk_neumann(self.sensor_locations, xi)
         
         return u - np.mean(u)
     
@@ -298,7 +304,9 @@ class AnalyticalLinearInverseSolver:
     Parameters
     ----------
     n_boundary : int
-        Number of boundary measurement points
+        Number of sensor/measurement points on boundary
+    sensor_locations : array, optional
+        Custom sensor locations (n_sensors, 2). If None, uses evenly spaced.
     source_resolution : float
         Grid spacing for source candidates (larger = fewer candidates)
     verbose : bool
@@ -311,37 +319,49 @@ class AnalyticalLinearInverseSolver:
     continuous source positions but is non-convex.
     """
     
-    def __init__(self, n_boundary: int = 100, source_resolution: float = 0.15, verbose: bool = True):
-        self.n_boundary = n_boundary
-        self.theta_boundary = np.linspace(0, 2*np.pi, n_boundary, endpoint=False)
-        self.boundary_points = np.column_stack([
-            np.cos(self.theta_boundary), 
-            np.sin(self.theta_boundary)
-        ])
+    def __init__(self, n_boundary: int = 100, sensor_locations: np.ndarray = None,
+                 source_resolution: float = 0.15, 
+                 verbose: bool = True):
+        
+        # Set up sensor/measurement locations
+        if sensor_locations is not None:
+            self.sensor_locations = np.asarray(sensor_locations)
+            self.n_sensors = len(self.sensor_locations)
+        else:
+            self.n_sensors = n_boundary
+            theta = np.linspace(0, 2*np.pi, n_boundary, endpoint=False)
+            self.sensor_locations = np.column_stack([np.cos(theta), np.sin(theta)])
+        
+        # For backward compatibility
+        self.n_boundary = self.n_sensors
+        self.boundary_points = self.sensor_locations
+        self.theta_boundary = np.arctan2(self.sensor_locations[:, 1], self.sensor_locations[:, 0])
         
         # Use shared mesh for source candidates
-        self.interior_points = get_source_grid(resolution=source_resolution, radius=0.9)
+        self.interior_points = get_source_grid(
+            resolution=source_resolution, radius=0.9
+        )
         self.n_interior = len(self.interior_points)
         self.G = None
         self._verbose = verbose
         
         if verbose:
-            print(f"Analytical Linear Inverse: {n_boundary} boundary pts, {self.n_interior} source candidates")
+            print(f"Analytical Linear Inverse: {self.n_sensors} sensors, {self.n_interior} source candidates")
         
     def build_greens_matrix(self, verbose: bool = None):
         """
         Build the Green's matrix G where G[i,j] = G(x_i, ξ_j).
         
-        This matrix maps source intensities to boundary measurements: u = G @ q
+        This matrix maps source intensities to sensor measurements: u = G @ q
         """
         if verbose is None:
             verbose = self._verbose
         if verbose:
-            print(f"Building Green's matrix ({self.n_boundary} × {self.n_interior})...")
+            print(f"Building Green's matrix ({self.n_sensors} × {self.n_interior})...")
         
-        self.G = np.zeros((self.n_boundary, self.n_interior))
+        self.G = np.zeros((self.n_sensors, self.n_interior))
         for j in range(self.n_interior):
-            self.G[:, j] = greens_function_disk_neumann(self.boundary_points, self.interior_points[j])
+            self.G[:, j] = greens_function_disk_neumann(self.sensor_locations, self.interior_points[j])
         
         # Center columns (remove mean from each column)
         self.G = self.G - np.mean(self.G, axis=0, keepdims=True)
@@ -412,12 +432,12 @@ class AnalyticalLinearInverseSolver:
         return q - np.mean(q)
     
     def solve_tv(self, u_measured: np.ndarray, alpha: float = 1e-4, 
-                 method: str = 'admm', rho: float = 1.0, max_iter: int = 100,
-                 verbose: bool = False) -> np.ndarray:
+                 method: str = 'cvxpy', rho: float = 1.0, max_iter: int = 500,
+                 tol: float = 1e-6, verbose: bool = False) -> np.ndarray:
         """
         Solve with Total Variation regularization.
         
-        Minimizes: ||Gq - u||² + α·TV(q)
+        Minimizes: ||Gq - u||² + α·TV(q) subject to Σq = 0
         
         where TV(q) = Σ|∇q| summed over mesh edges.
         
@@ -426,13 +446,15 @@ class AnalyticalLinearInverseSolver:
         u_measured : array
             Boundary measurements
         alpha : float
-            Regularization parameter
+            Regularization parameter (typically 10-100x larger than L1/L2)
         method : str
-            'admm' or 'chambolle_pock'
+            'cvxpy' (accurate, default), 'admm' (faster), or 'chambolle_pock'
         rho : float
-            ADMM penalty parameter
+            ADMM penalty parameter (only for method='admm')
         max_iter : int
             Maximum iterations
+        tol : float
+            Convergence tolerance for ADMM
         verbose : bool
             Print convergence info
             
@@ -440,6 +462,12 @@ class AnalyticalLinearInverseSolver:
         -------
         q : array
             Recovered source intensities
+            
+        Notes
+        -----
+        TV regularization promotes piecewise-constant solutions. For point
+        source recovery, α typically needs to be 10-100x larger than for L1/L2.
+        Use parameter_selection.parameter_sweep() to find optimal α.
         """
         if self.G is None: 
             self.build_greens_matrix()
@@ -456,23 +484,79 @@ class AnalyticalLinearInverseSolver:
         for k, (i, j) in enumerate(edges):
             D[k, i], D[k, j] = 1, -1
         
+        if method.lower() == 'cvxpy':
+            # Use cvxpy for accurate solution with proper constraint handling
+            try:
+                import cvxpy as cp
+            except ImportError:
+                if verbose:
+                    print("cvxpy not available, falling back to ADMM")
+                method = 'admm'
+            else:
+                n = self.n_interior
+                q_var = cp.Variable(n)
+                constraints = [cp.sum(q_var) == 0]  # Compatibility constraint
+                objective = cp.Minimize(
+                    0.5 * cp.sum_squares(self.G @ q_var - u) + alpha * cp.norm1(D @ q_var)
+                )
+                prob = cp.Problem(objective, constraints)
+                # Use ECOS solver for consistent results across systems
+                # OSQP can give different results on different machines
+                try:
+                    prob.solve(solver=cp.ECOS, verbose=verbose)
+                except Exception:
+                    prob.solve(verbose=verbose)  # Fallback to default
+                
+                if q_var.value is not None:
+                    return q_var.value
+                else:
+                    if verbose:
+                        print("cvxpy failed, falling back to ADMM")
+                    method = 'admm'
+        
         if method.lower() in ('admm', 'tv_admm'):
-            # ADMM implementation
-            q = np.zeros(self.n_interior)
-            z = np.zeros(len(edges))
-            w = np.zeros(len(edges))
-            A_inv = np.linalg.inv(self.G.T @ self.G + rho * D.T @ D)
+            # ADMM implementation with constraint projection
+            n = self.n_interior
+            m = len(edges)
+            
+            q = np.zeros(n)
+            z = np.zeros(m)
+            w = np.zeros(m)
+            
+            # Precompute matrix inverse
+            A = self.G.T @ self.G + rho * D.T @ D
+            A_inv = np.linalg.inv(A)
             Gtu = self.G.T @ u
             
             for it in range(max_iter):
+                q_old = q.copy()
+                
+                # q-update
                 q = A_inv @ (Gtu + rho * D.T @ (z - w))
+                
+                # Project onto sum(q) = 0 constraint
+                q = q - np.mean(q)
+                
+                # z-update (soft thresholding)
                 Dq = D @ q
+                z_old = z.copy()
                 z = np.sign(Dq + w) * np.maximum(np.abs(Dq + w) - alpha/rho, 0)
+                
+                # w-update (dual)
                 w = w + Dq - z
                 
-                if verbose and it % 20 == 0:
+                # Check convergence
+                primal_res = np.linalg.norm(Dq - z)
+                dual_res = rho * np.linalg.norm(D.T @ (z - z_old))
+                
+                if verbose and it % 50 == 0:
                     energy = 0.5 * np.linalg.norm(self.G @ q - u)**2 + alpha * np.sum(np.abs(D @ q))
-                    print(f"  ADMM iter {it}: energy = {energy:.6e}")
+                    print(f"  ADMM iter {it}: energy={energy:.6e}, primal={primal_res:.2e}, dual={dual_res:.2e}")
+                
+                if primal_res < tol and dual_res < tol:
+                    if verbose:
+                        print(f"  ADMM converged at iter {it}")
+                    break
         
         elif method.lower() in ('chambolle_pock', 'cp', 'tv_cp'):
             try:
@@ -484,7 +568,7 @@ class AnalyticalLinearInverseSolver:
             q = result.q
         
         else:
-            raise ValueError(f"Unknown TV method: {method}. Use 'admm' or 'chambolle_pock'")
+            raise ValueError(f"Unknown TV method: {method}. Use 'cvxpy', 'admm', or 'chambolle_pock'")
         
         return q - np.mean(q)
     
@@ -505,7 +589,9 @@ class AnalyticalNonlinearInverseSolver:
     n_sources : int
         Number of sources to recover
     n_boundary : int
-        Number of boundary measurement points
+        Number of sensor/measurement points
+    sensor_locations : array, optional
+        Custom sensor locations. If None, uses evenly spaced on unit circle.
         
     Notes
     -----
@@ -517,9 +603,10 @@ class AnalyticalNonlinearInverseSolver:
     only n-1 intensities and computing the last as q_n = -Σq_{k<n}.
     """
     
-    def __init__(self, n_sources: int, n_boundary: int = 100):
+    def __init__(self, n_sources: int, n_boundary: int = 100,
+                 sensor_locations: np.ndarray = None):
         self.n_sources = n_sources
-        self.forward = AnalyticalForwardSolver(n_boundary)
+        self.forward = AnalyticalForwardSolver(n_boundary, sensor_locations=sensor_locations)
         self.u_measured = None
         self.history = []
     
@@ -560,7 +647,7 @@ class AnalyticalNonlinearInverseSolver:
         if init_from == 'random' or seed > 0:
             np.random.seed(42 + seed)
             for i in range(n):
-                r = 0.3 + 0.4 * np.random.rand()
+                r = 0.5 + 0.35 * np.random.rand()  # r in [0.5, 0.85] for better conditioning
                 angle = 2 * np.pi * np.random.rand()
                 x0.extend([r * np.cos(angle), r * np.sin(angle)])
                 if i < n - 1:

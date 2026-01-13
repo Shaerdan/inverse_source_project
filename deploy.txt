@@ -1,0 +1,8 @@
+cd ~/Projects/inverse_source_project/
+unzip -o ~/Downloads/inverse_source_v7.23.zip -d src/
+pip install -e .
+
+
+python -m inverse_source.cli calibrate --output-dir results/calibration --plot
+
+for d in disk ellipse star square polygon brain; do     python -m inverse_source.cli compare --domain $d --quick; done

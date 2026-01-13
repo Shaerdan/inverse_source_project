@@ -20,6 +20,8 @@ setup(
         "scipy>=1.11",
         "matplotlib>=3.7",
         "scikit-learn>=1.3",
+        "cvxpy>=1.4",
+        "ecos>=2.0",
         "gmsh>=4.12",
         "meshio>=5.3",
         "tqdm",
