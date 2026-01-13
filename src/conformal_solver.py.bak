@@ -1580,17 +1580,9 @@ def create_conformal_map(domain: str, **kwargs) -> ConformalMap:
         return DiskMap(radius=kwargs.get('radius', 1.0))
     
     elif domain == 'ellipse':
-        a = kwargs.get('a', 2.0)
-        b = kwargs.get('b', 1.0)
-        # Use MFSConformalMap instead of EllipseMap to avoid branch cut issue
-        # EllipseMap (Joukowsky transform) has a branch cut along [-c, +c] on real axis
-        # where c = sqrt(a² - b²), causing optimization failures for sources near the cut
-        def ellipse_boundary(t):
-            return a * np.cos(t) + 1j * b * np.sin(t)
-        return MFSConformalMap(
-            ellipse_boundary,
-            n_boundary=kwargs.get('n_boundary', 256),
-            n_charge=kwargs.get('n_charge', 200)
+        return EllipseMap(
+            a=kwargs.get('a', 2.0),
+            b=kwargs.get('b', 1.0)
         )
     
     elif domain == 'rectangle':
