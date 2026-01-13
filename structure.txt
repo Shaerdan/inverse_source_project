@@ -1,0 +1,144 @@
+.
+├── Config
+│   ├── config.json
+│   ├── config.yaml
+│   └── config_template.json
+├── README.md
+├── README.md:Zone.Identifier
+├── __init__.py
+├── analytical_solver.py
+├── bem_solver.py
+├── cli.py
+├── comparison.py
+├── comparison.py:Zone.Identifier
+├── config.json
+├── config.py
+├── config.yaml
+├── conformal_solver.py
+├── deploy.txt
+├── docs
+│   ├── README.md
+│   ├── main.pdf
+│   ├── main.tex
+│   ├── references.bib
+│   ├── session_summary_2025-12-25.md
+│   ├── session_summary_2025-12-27.md
+│   └── session_summary_2026-01-01.md
+├── environment.yml
+├── examples
+│   └── complete_example.py
+├── fem_solver.py
+├── inverse_source.egg-info
+│   ├── PKG-INFO
+│   ├── SOURCES.txt
+│   ├── dependency_links.txt
+│   ├── entry_points.txt
+│   ├── requires.txt
+│   └── top_level.txt
+├── main.tex
+├── mesh.py
+├── mesh_convergence.py
+├── mesh_convergence.py:Zone.Identifier
+├── meshes
+│   ├── circle_domain.msh
+│   └── custom_domain.msh
+├── notebooks
+│   └── 01_forward_solver_demo.ipynb
+├── parameter_study.py
+├── pyproject.toml
+├── references.bib
+├── regularization.py
+├── requirements.txt
+├── setup.py
+├── src
+│   ├── BUG_REPORT.md
+│   ├── README.md
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-312.pyc
+│   │   ├── analytical_solver.cpython-312.pyc
+│   │   ├── bem_solver.cpython-312.pyc
+│   │   ├── calibration.cpython-312.pyc
+│   │   ├── comparison.cpython-312.pyc
+│   │   ├── config.cpython-312.pyc
+│   │   ├── conformal_solver.cpython-312.pyc
+│   │   ├── experiment_tracker.cpython-312.pyc
+│   │   ├── fem_solver.cpython-312.pyc
+│   │   ├── mesh.cpython-312.pyc
+│   │   ├── mesh_convergence.cpython-312.pyc
+│   │   ├── parameter_selection.cpython-312.pyc
+│   │   ├── parameter_study.cpython-312.pyc
+│   │   ├── polar_solver.cpython-312.pyc
+│   │   ├── reference_solution.cpython-312.pyc
+│   │   ├── regularization.cpython-312.pyc
+│   │   ├── test_nonlinear_validation.cpython-312.pyc
+│   │   ├── test_scalability.cpython-312.pyc
+│   │   └── utils.cpython-312.pyc
+│   ├── analytical_solver.py
+│   ├── bem_solver.py
+│   ├── calibration.py
+│   ├── cli.py
+│   ├── comparison.py
+│   ├── comprehensive_test_v1.py
+│   ├── config.json
+│   ├── config.py
+│   ├── config.yaml
+│   ├── conformal_solver.py
+│   ├── debug_all_methods.py
+│   ├── diagnose_fem_performance.py
+│   ├── diagnose_solver_comparison.py
+│   ├── docs
+│   │   ├── mathematical_formulation_part1.pdf
+│   │   ├── mathematical_formulation_part1.tex
+│   │   ├── mathematical_formulation_part2.pdf
+│   │   ├── mathematical_formulation_part2.tex
+│   │   ├── mathematical_formulation_part3.pdf
+│   │   └── mathematical_formulation_part3.tex
+│   ├── experiment_tracker.py
+│   ├── fem_solver.py
+│   ├── journal.txt
+│   ├── main.tex
+│   ├── mathematical_formulation.tex
+│   ├── mesh.py
+│   ├── mesh_convergence.py
+│   ├── parameter_selection.py
+│   ├── parameter_study.py
+│   ├── polar_solver.py
+│   ├── pyproject.toml
+│   ├── reference_solution.py
+│   ├── references.bib
+│   ├── regularization.py
+│   ├── requirements.txt
+│   ├── results
+│   │   └── compare_all_20260113_144158
+│   │       ├── brain_comparison.png
+│   │       ├── combined_summary.png
+│   │       ├── disk_comparison.png
+│   │       ├── ellipse_comparison.png
+│   │       ├── square_comparison.png
+│   │       ├── star_comparison.png
+│   │       └── summary.json
+│   ├── run_all_tests.py
+│   ├── session_summary_2025-12-27.md
+│   ├── session_summary_2026-01-01.md
+│   ├── session_summary_2026_01_12_continued.md
+│   ├── setup.py
+│   ├── test_mfs_conformal_fix.py
+│   ├── test_mfs_conformal_fix.py:Zone.Identifier
+│   ├── test_nonlinear_validation.py
+│   ├── test_scalability - Copy.py:Zone.Identifier
+│   ├── test_scalability.py
+│   ├── test_v726_comprehensive.py
+│   ├── utils.py
+│   ├── validate_nonlinear_solvers.py
+│   ├── verify_installation.py
+│   └── verify_mesh_consistency.py
+├── structure.txt
+├── tests
+│   ├── __init__.py
+│   └── test_forward_solver.py
+├── utils.py
+└── {src,meshes,results,notebooks}
+
+13 directories, 128 files

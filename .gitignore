@@ -1,16 +1,27 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
+*.egg
 dist/
 build/
 .eggs/
-results/*.png
-results/*.json
-*.log
-.DS_Store
+
+# Windows
+*:Zone.Identifier
+Thumbs.db
+
+# IDE
 .idea/
 .vscode/
-*Zone.Identifier
-*:Zone.Identifier
+*.swp
+*.swo
+
+# Results (optional - remove this line if you want to track results)
+src/results/
+
+# OS
+.DS_Store
