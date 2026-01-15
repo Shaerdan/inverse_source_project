@@ -1093,7 +1093,9 @@ class FEMNonlinearInverseSolver:
         # Compute bounds from vertices
         x_min, y_min = vertices_arr.min(axis=0)
         x_max, y_max = vertices_arr.max(axis=0)
-        margin = 0.1 * min(x_max - x_min, y_max - y_min)
+        # Use small margin (5%) to keep sources inside but not too constrained
+        # Larger margin (10%) caused DE to fail when true sources near boundary
+        margin = 0.05 * min(x_max - x_min, y_max - y_min)
         bounds = ((x_min + margin, x_max - margin), (y_min + margin, y_max - margin))
         
         return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
@@ -1141,40 +1143,59 @@ class FEMNonlinearInverseSolver:
         self.u_measured = u_measured - np.mean(u_measured)
     
     def _params_to_sources(self, params) -> List[Tuple[Tuple[float, float], float]]:
-        """Convert optimization parameters to source list."""
-        sources = []
-        for i in range(self.n_sources - 1):
-            x = params[3*i]
-            y = params[3*i + 1]
-            q = params[3*i + 2]
-            sources.append(((x, y), q))
+        """Convert optimization parameters to source list.
         
-        # Last source: intensity from constraint Σqₖ = 0
-        x_last = params[3*(self.n_sources - 1)]
-        y_last = params[3*(self.n_sources - 1) + 1]
-        q_last = -sum(q for _, q in sources)
-        sources.append(((x_last, y_last), q_last))
+        Parameters layout: [x0, y0, x1, y1, ..., x_{n-1}, y_{n-1}, q0, q1, ..., q_{n-1}]
+        (all positions first, then all intensities)
+        
+        Zero-sum constraint enforced by centering intensities.
+        """
+        n = self.n_sources
+        sources = []
+        
+        # Extract positions
+        positions = [(params[2*i], params[2*i + 1]) for i in range(n)]
+        
+        # Extract intensities and center them (enforces zero-sum)
+        intensities = np.array([params[2*n + i] for i in range(n)])
+        intensities = intensities - np.mean(intensities)  # Centering enforces Σq = 0
+        
+        for i in range(n):
+            sources.append((positions[i], intensities[i]))
         
         return sources
     
     def _objective(self, params) -> float:
-        """Objective function: ||u_computed - u_measured||²"""
+        """Objective function: ||u_computed - u_measured||² + soft penalty for boundary violations."""
         sources = self._params_to_sources(params)
         
-        # Penalty for sources outside domain
-        for (x, y), _ in sources:
+        # Soft penalty for sources outside domain (allows gradient-based escape)
+        # Using quadratic penalty instead of hard cutoff
+        penalty = 0.0
+        penalty_weight = 1000.0  # Large but finite
+        
+        for (x, y), q in sources:
             if self.domain_type == 'polygon':
                 vertices = self.domain_params.get('vertices', [])
                 if vertices and not self._point_in_polygon(x, y, vertices):
-                    return 1e10
+                    # Estimate distance outside polygon (approximate)
+                    # Use distance from centroid as proxy
+                    cx = np.mean([v[0] for v in vertices])
+                    cy = np.mean([v[1] for v in vertices])
+                    dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+                    penalty += penalty_weight * dist**2
             elif self.domain_type == 'ellipse':
                 a = self.domain_params.get('a', 1.0)
                 b = self.domain_params.get('b', 1.0)
-                if (x/a)**2 + (y/b)**2 >= 0.85**2:
-                    return 1e10
+                r_normalized = np.sqrt((x/a)**2 + (y/b)**2)
+                if r_normalized >= 0.95:  # Soft boundary at 95% of ellipse
+                    excess = r_normalized - 0.95
+                    penalty += penalty_weight * excess**2
             else:  # disk
-                if x**2 + y**2 >= 0.85**2:
-                    return 1e10
+                r = np.sqrt(x**2 + y**2)
+                if r >= 0.95:  # Soft boundary at r=0.95
+                    excess = r - 0.95
+                    penalty += penalty_weight * excess**2
         
         u_computed = self.forward.solve(sources)
         
@@ -1189,10 +1210,11 @@ class FEMNonlinearInverseSolver:
         misfit = np.sum((u_computed - self.u_measured)**2)
         self.history.append(misfit)
         
-        return misfit
+        return misfit + penalty
     
     def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200, 
-              n_restarts: int = 1, init_from: str = 'circle') -> InverseResult:
+              n_restarts: int = 5, init_from: str = 'random',
+              intensity_bounds: tuple = (-2.0, 2.0)) -> InverseResult:
         """
         Solve the nonlinear inverse problem.
         
@@ -1207,6 +1229,9 @@ class FEMNonlinearInverseSolver:
         init_from : str
             'circle' - sources on circle (default)
             'random' - random positions
+        intensity_bounds : tuple
+            Bounds for source intensities (default: (-2.0, 2.0))
+            Tighter bounds improve convergence for well-separated sources.
         """
         if self.u_measured is None:
             raise ValueError("Call set_measured_data first")
@@ -1214,12 +1239,14 @@ class FEMNonlinearInverseSolver:
         self.history = []
         n = self.n_sources
         
-        # Bounds - use stored bounds for custom domains
+        # Bounds for new parameter layout: [x0, y0, x1, y1, ..., q0, q1, ...]
         bounds = []
+        # Position bounds (all positions first)
         for i in range(n):
             bounds.extend([self.x_bounds, self.y_bounds])
-            if i < n - 1:
-                bounds.append((-5.0, 5.0))
+        # Intensity bounds (all intensities after positions)
+        for i in range(n):
+            bounds.append(intensity_bounds)
         
         best_result = None
         best_fun = np.inf
@@ -1260,48 +1287,129 @@ class FEMNonlinearInverseSolver:
     def _get_initial_guess(self, init_from: str, seed: int) -> list:
         """Generate initial guess for optimization.
         
-        For non-disk domains, uses interior mesh points or domain centroid
-        to ensure initial guesses are valid.
+        Parameters layout: [x0, y0, x1, y1, ..., q0, q1, ...]
+        (all positions first, then all intensities)
+        
+        Domain-aware initialization ensures initial points are inside valid region
+        AND spread out to avoid local minima from clustered sources.
         """
         n = self.n_sources
+        positions = []  # Will hold [(x0, y0), (x1, y1), ...]
+        
+        # Use seed parameter to rotate the base pattern (deterministic variation)
+        angle_offset = seed * 0.2
+        
+        if self.domain_type == 'disk':
+            r = 0.6
+            for i in range(n):
+                theta = 2 * np.pi * i / n + angle_offset
+                if init_from == 'random':
+                    theta += np.random.uniform(-0.2, 0.2)
+                    r_i = r + np.random.uniform(-0.1, 0.1)
+                else:
+                    r_i = r
+                x = r_i * np.cos(theta)
+                y = r_i * np.sin(theta)
+                positions.append((x, y))
+        
+        elif self.domain_type == 'ellipse':
+            a = self.domain_params.get('a', 1.0)
+            b = self.domain_params.get('b', 1.0)
+            scale = 0.7
+            for i in range(n):
+                theta = 2 * np.pi * i / n + angle_offset
+                if init_from == 'random':
+                    theta += np.random.uniform(-0.2, 0.2)
+                    scale_i = scale + np.random.uniform(-0.1, 0.1)
+                else:
+                    scale_i = scale
+                x = a * scale_i * np.cos(theta)
+                y = b * scale_i * np.sin(theta)
+                positions.append((x, y))
+        
+        else:  # polygon
+            vertices = self.domain_params.get('vertices', [])
+            
+            if vertices and hasattr(self, 'forward') and hasattr(self.forward, 'nodes'):
+                nodes = self.forward.nodes
+                boundary_idx = set(self.forward.boundary_indices) if hasattr(self.forward, 'boundary_indices') else set()
+                interior_pts = np.array([nodes[i] for i in range(len(nodes)) if i not in boundary_idx])
+                
+                if len(interior_pts) >= n:
+                    cx = np.mean(interior_pts[:, 0])
+                    cy = np.mean(interior_pts[:, 1])
+                    angles = np.arctan2(interior_pts[:, 1] - cy, interior_pts[:, 0] - cx)
+                    target_angles = [2 * np.pi * i / n + angle_offset for i in range(n)]
+                    
+                    for target in target_angles:
+                        angle_diff = np.abs(np.mod(angles - target + np.pi, 2*np.pi) - np.pi)
+                        distances = np.sqrt((interior_pts[:, 0] - cx)**2 + (interior_pts[:, 1] - cy)**2)
+                        max_dist = np.max(distances)
+                        target_dist = 0.7 * max_dist
+                        scores = angle_diff + 0.5 * np.abs(distances - target_dist) / max_dist
+                        best_idx = np.argmin(scores)
+                        
+                        x, y = interior_pts[best_idx]
+                        if init_from == 'random':
+                            x += np.random.uniform(-0.05, 0.05)
+                            y += np.random.uniform(-0.05, 0.05)
+                        positions.append((x, y))
+                else:
+                    # Fallback to centroid-based
+                    cx = np.mean([v[0] for v in vertices])
+                    cy = np.mean([v[1] for v in vertices])
+                    for i in range(n):
+                        theta = 2 * np.pi * i / n + angle_offset
+                        for scale in [0.3, 0.5, 0.7, 0.2, 0.1]:
+                            x = cx + scale * np.cos(theta)
+                            y = cy + scale * np.sin(theta)
+                            if self._point_in_polygon(x, y, vertices):
+                                break
+                        if init_from == 'random':
+                            x += np.random.uniform(-0.05, 0.05)
+                            y += np.random.uniform(-0.05, 0.05)
+                        positions.append((x, y))
+            elif vertices:
+                # No mesh, centroid-based
+                cx = np.mean([v[0] for v in vertices])
+                cy = np.mean([v[1] for v in vertices])
+                for i in range(n):
+                    theta = 2 * np.pi * i / n + angle_offset
+                    for scale in [0.3, 0.5, 0.7, 0.2, 0.1]:
+                        x = cx + scale * np.cos(theta)
+                        y = cy + scale * np.sin(theta)
+                        if self._point_in_polygon(x, y, vertices):
+                            break
+                    if init_from == 'random':
+                        x += np.random.uniform(-0.05, 0.05)
+                        y += np.random.uniform(-0.05, 0.05)
+                    positions.append((x, y))
+            else:
+                # No vertices, rectangular fallback
+                x_min, x_max = self.x_bounds
+                y_min, y_max = self.y_bounds
+                cx = (x_min + x_max) / 2
+                cy = (y_min + y_max) / 2
+                half_w = (x_max - x_min) / 2 * 0.7
+                half_h = (y_max - y_min) / 2 * 0.7
+                
+                for i in range(n):
+                    theta = 2 * np.pi * i / n + angle_offset
+                    if init_from == 'random':
+                        theta += np.random.uniform(-0.2, 0.2)
+                        scale = 1.0 + np.random.uniform(-0.15, 0.15)
+                    else:
+                        scale = 1.0
+                    x = cx + half_w * scale * np.cos(theta)
+                    y = cy + half_h * scale * np.sin(theta)
+                    positions.append((x, y))
+        
+        # Build parameter vector: all positions first, then all intensities
         x0 = []
-        
-        # Get domain bounds
-        x_min, x_max = self.x_bounds
-        y_min, y_max = self.y_bounds
-        
-        # Compute domain centroid and safe radius
-        cx = (x_min + x_max) / 2
-        cy = (y_min + y_max) / 2
-        
-        # Safe radius is half the smaller dimension, shrunk by 0.6
-        safe_r = min(x_max - cx, y_max - cy) * 0.6
-        
-        if init_from == 'random' or seed > 0:
-            np.random.seed(42 + seed)
-            for i in range(n):
-                # Use random angle and safe radius relative to domain centroid
-                r = safe_r * (0.3 + 0.5 * np.random.rand())  # r in [0.3*safe_r, 0.8*safe_r]
-                angle = 2 * np.pi * np.random.rand()
-                x = cx + r * np.cos(angle)
-                y = cy + r * np.sin(angle)
-                
-                # Clamp to bounds
-                x = np.clip(x, x_min * 0.9, x_max * 0.9)
-                y = np.clip(y, y_min * 0.9, y_max * 0.9)
-                
-                x0.extend([x, y])
-                if i < n - 1:
-                    x0.append(np.random.randn())
-        else:
-            # Circle initialization around centroid
-            for i in range(n):
-                angle = 2 * np.pi * i / n
-                x = cx + safe_r * 0.5 * np.cos(angle)
-                y = cy + safe_r * 0.5 * np.sin(angle)
-                x0.extend([x, y])
-                if i < n - 1:
-                    x0.append(1.0 if i % 2 == 0 else -1.0)
+        for (x, y) in positions:
+            x0.extend([x, y])
+        for i in range(n):
+            x0.append(np.random.uniform(-0.5, 0.5))  # Random initial intensities
         
         return x0
 
