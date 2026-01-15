@@ -147,6 +147,14 @@ Examples:
                                help='Ellipse semi-minor axis (for --domain ellipse)')
     compare_parser.add_argument('--vertices', type=str, default=None,
                                help='Polygon vertices as JSON, e.g., "[[0,0],[2,0],[2,1],[1,1],[1,2],[0,2]]"')
+    compare_parser.add_argument('--preset', type=str, default=None,
+                               help='Test preset name (e.g., easy_validation, six_sources). Use --list-presets to see options.')
+    compare_parser.add_argument('--config', type=str, default=None,
+                               help='Path to test configuration JSON file')
+    compare_parser.add_argument('--list-presets', action='store_true',
+                               help='List available test presets and exit')
+    compare_parser.add_argument('--n-sources', type=int, default=None,
+                               help='Number of sources (overrides preset)')
     
     # Calibrate command
     cal_parser = subparsers.add_parser('calibrate', help='Calibrate parameters for all domains')
@@ -506,6 +514,16 @@ For more information:
 
 def run_compare(args):
     """Run solver comparison with experiment tracking."""
+    
+    # Handle --list-presets first
+    if getattr(args, 'list_presets', False):
+        try:
+            from .test_config import list_presets
+        except ImportError:
+            from test_config import list_presets
+        list_presets(args.config if hasattr(args, 'config') else None)
+        return
+    
     try:
         from .comparison import (compare_all_solvers, compare_with_optimal_alpha, 
                                 print_comparison_table, plot_comparison,
@@ -535,9 +553,13 @@ def run_compare_multi_domain(args):
     try:
         from .comparison import (compare_all_solvers_general, print_comparison_table, 
                                 plot_comparison, create_domain_sources)
+        from .test_config import (TestConfigManager, generate_sources_from_config,
+                                  SourceConfig, MeasurementConfig, OptimizerConfig)
     except ImportError:
         from comparison import (compare_all_solvers_general, print_comparison_table, 
                                plot_comparison, create_domain_sources)
+        from test_config import (TestConfigManager, generate_sources_from_config,
+                                 SourceConfig, MeasurementConfig, OptimizerConfig)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -546,6 +568,17 @@ def run_compare_multi_domain(args):
     from datetime import datetime
     
     DEFAULT_CALIBRATION_PATH = 'results/calibration/calibration_config.json'
+    
+    # Load test configuration if preset specified
+    test_config = None
+    preset_name = getattr(args, 'preset', None)
+    config_path = getattr(args, 'config', None)
+    
+    if preset_name or config_path:
+        test_config = TestConfigManager(config_path)
+        if preset_name:
+            print(f"Using test preset: {preset_name}")
+            test_config.print_preset_summary(preset_name)
     
     # Load calibration if available
     cal_config = None
@@ -561,6 +594,33 @@ def run_compare_multi_domain(args):
         print(f"Loading calibration: {calibration_path}")
         cal_config = load_calibration_config(calibration_path)
     
+    # Get configuration from preset or use defaults
+    if test_config and preset_name:
+        src_config = test_config.get_source_config(preset_name)
+        meas_config = test_config.get_measurement_config(preset_name)
+        opt_config = test_config.get_optimizer_config(preset_name)
+        solver_config = test_config.get_solver_config(preset_name)
+        seed = test_config.get_seed(preset_name)
+        
+        # Override n_sources if specified on command line
+        if getattr(args, 'n_sources', None):
+            src_config.n_sources = args.n_sources
+        
+        # Override noise if specified on command line
+        if args.noise != 0.001:  # 0.001 is default
+            meas_config.noise_level = args.noise
+        
+        # Override seed if specified
+        if args.seed != 42:  # 42 is default
+            seed = args.seed
+    else:
+        # Use legacy defaults
+        src_config = None
+        meas_config = None
+        opt_config = None
+        solver_config = None
+        seed = args.seed
+    
     # Output directory
     output_dir = Path(args.output_dir) / f"compare_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -569,6 +629,10 @@ def run_compare_multi_domain(args):
     print("COMPREHENSIVE SOLVER COMPARISON - ALL DOMAINS")
     print("=" * 70)
     print(f"Domains: {args.domains}")
+    if preset_name:
+        print(f"Preset: {preset_name}")
+        if src_config:
+            print(f"Sources: {src_config.n_sources}")
     print(f"Output: {output_dir}")
     print(f"Mode: {'Quick' if args.quick else 'Full'}")
     print("=" * 70)
@@ -586,6 +650,8 @@ def run_compare_multi_domain(args):
             domain_params = {'a': args.ellipse_a, 'b': args.ellipse_b}
         elif domain == 'square':
             domain_params = {'vertices': [(-1, -1), (1, -1), (1, 1), (-1, 1)]}
+        elif domain == 'star':
+            domain_params = {'n_petals': 5, 'amplitude': 0.3}
         
         # Get calibration for this domain
         calibration_params = None
@@ -597,8 +663,28 @@ def run_compare_multi_domain(args):
             except:
                 pass
         
-        # Get test sources
-        sources_true = create_domain_sources(domain, domain_params)
+        # Get test sources - use preset config if available
+        if src_config and src_config.placement_method != 'domain_default':
+            sources_true = generate_sources_from_config(
+                domain_type=domain,
+                source_config=src_config,
+                domain_params=domain_params,
+                seed=seed,
+                domain_defaults_func=create_domain_sources
+            )
+            print(f"  Generated {len(sources_true)} sources from preset config")
+        else:
+            # Fall back to domain defaults
+            n_sources = src_config.n_sources if src_config else 4
+            sources_true = create_domain_sources(domain, domain_params, n_sources=n_sources)
+        
+        # Show sources
+        print(f"  Sources:")
+        for i, ((x, y), q) in enumerate(sources_true):
+            print(f"    {i+1}: ({x:+.3f}, {y:+.3f}), q={q:+.2f}")
+        
+        # Get noise level from config or args
+        noise_level = meas_config.noise_level if meas_config else args.noise
         
         # Determine alpha
         if calibration_params:
@@ -614,19 +700,33 @@ def run_compare_multi_domain(args):
             fwd_res = 0.1
             src_res = 0.15
         
+        # Get optimizer settings from preset
+        n_restarts = opt_config.lbfgsb_n_restarts if opt_config else 5
+        maxiter = opt_config.lbfgsb_maxiter if opt_config else 2000
+        
+        # Determine which solvers to run
+        run_nonlinear = True
+        if solver_config:
+            run_nonlinear = solver_config.run_nonlinear
+        if args.no_nonlinear:
+            run_nonlinear = False
+        
         # Run comparison
         try:
             results = compare_all_solvers_general(
                 domain_type=domain,
                 domain_params=domain_params,
                 sources_true=sources_true,
-                noise_level=args.noise,
+                noise_level=noise_level,
                 alpha=alpha_dict if calibration_params else ('auto' if not args.fixed_alpha else args.alpha),
                 forward_resolution=fwd_res,
                 source_resolution=src_res,
                 quick=args.quick,
-                seed=args.seed,
-                verbose=True
+                seed=seed,
+                verbose=True,
+                n_restarts=n_restarts,
+                maxiter=maxiter,
+                run_nonlinear=run_nonlinear
             )
             
             all_results[domain] = {
@@ -655,6 +755,7 @@ def run_compare_multi_domain(args):
     summary = {
         'timestamp': datetime.now().isoformat(),
         'domains': args.domains,
+        'preset': preset_name,
         'mode': 'quick' if args.quick else 'full',
         'results': {}
     }

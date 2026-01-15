@@ -3037,7 +3037,11 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                                  source_resolution: float = 0.15,
                                  quick: bool = False,
                                  seed: int = 42,
-                                 verbose: bool = True) -> List[ComparisonResult]:
+                                 verbose: bool = True,
+                                 n_restarts: int = 5,
+                                 maxiter: int = 2000,
+                                 run_nonlinear: bool = True,
+                                 run_linear: bool = True) -> List[ComparisonResult]:
     """
     Comprehensive comparison of ALL available solvers for any supported domain.
     
@@ -3412,74 +3416,80 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- ANALYTICAL NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("ANALYTICAL NONLINEAR SOLVERS (Disk)")
-            print("="*60)
-        
-        if quick:
-            optimizers = [('L-BFGS-B', 5)]
-        else:
-            optimizers = [('L-BFGS-B', 5), ('differential_evolution', 1)]
-        
-        for opt, n_restarts in optimizers:
+        if not run_nonlinear:
             if verbose:
-                label = f"{opt}" + (f" x{n_restarts}" if n_restarts > 1 else "")
-                print(f"\nRunning Analytical Nonlinear ({label})...")
-            try:
-                result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources,
-                                           optimizer=opt, n_restarts=n_restarts, seed=seed,
-                                           sensor_locations=sensor_locations)
-                results.append(result)
-                if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                print("\n  (Skipping nonlinear solvers per configuration)")
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print("ANALYTICAL NONLINEAR SOLVERS (Disk)")
+                print("="*60)
+            
+            if quick:
+                optimizers = [('L-BFGS-B', n_restarts)]
+            else:
+                optimizers = [('L-BFGS-B', n_restarts), ('differential_evolution', 1)]
+            
+            for opt, opt_restarts in optimizers:
+                            if verbose:
+                                label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
+                                print(f"\nRunning Analytical Nonlinear ({label})...")
+                            try:
+                                result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources,
+                                                           optimizer=opt, n_restarts=opt_restarts, seed=seed,
+                                                           sensor_locations=sensor_locations)
+                                results.append(result)
+                                if verbose:
+                                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                            except Exception as e:
+                                if verbose:
+                                    print(f"  Failed: {e}")
         
         # --- FEM LINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("FEM LINEAR SOLVERS (Disk)")
-            print("="*60)
-        
-        for method in ['l1', 'l2', 'tv']:
-            method_alpha = get_alpha_for_method(alpha, method, scale_factor=10)  # FEM needs larger base alpha
+        if run_linear:
             if verbose:
-                print(f"\nRunning FEM Linear ({method.upper()}, α={method_alpha:.1e})...")
-            try:
-                result = run_fem_linear(u_measured, sources_true, alpha=method_alpha, method=method,
-                                        forward_resolution=forward_resolution, 
-                                        source_resolution=source_resolution,
-                                        sensor_locations=sensor_locations)
-                results.append(result)
+                print("\n" + "="*60)
+                print("FEM LINEAR SOLVERS (Disk)")
+                print("="*60)
+            
+            for method in ['l1', 'l2', 'tv']:
+                method_alpha = get_alpha_for_method(alpha, method, scale_factor=10)  # FEM needs larger base alpha
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning FEM Linear ({method.upper()}, α={method_alpha:.1e})...")
+                try:
+                    result = run_fem_linear(u_measured, sources_true, alpha=method_alpha, method=method,
+                                            forward_resolution=forward_resolution, 
+                                            source_resolution=source_resolution,
+                                            sensor_locations=sensor_locations)
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("FEM NONLINEAR SOLVERS (Disk)")
-            print("="*60)
-        
-        for opt, n_restarts in optimizers:
+        if run_nonlinear:
             if verbose:
-                label = f"{opt}" + (f" x{n_restarts}" if n_restarts > 1 else "")
-                print(f"\nRunning FEM Nonlinear ({label})...")
-            try:
-                result = run_fem_nonlinear(u_measured, sources_true, n_sources=n_sources,
-                                           optimizer=opt, n_restarts=n_restarts, seed=seed,
-                                           resolution=forward_resolution,
-                                           sensor_locations=sensor_locations)
-                results.append(result)
+                print("\n" + "="*60)
+                print("FEM NONLINEAR SOLVERS (Disk)")
+                print("="*60)
+            
+            for opt, opt_restarts in optimizers:
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
+                    print(f"\nRunning FEM Nonlinear ({label})...")
+                try:
+                    result = run_fem_nonlinear(u_measured, sources_true, n_sources=n_sources,
+                                               optimizer=opt, n_restarts=opt_restarts, seed=seed,
+                                               resolution=forward_resolution,
+                                               sensor_locations=sensor_locations)
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
     
     elif domain_type == 'ellipse':
         # ELLIPSE: Conformal + FEM (using shared mesh for fair comparison)
