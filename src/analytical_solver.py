@@ -615,29 +615,43 @@ class AnalyticalNonlinearInverseSolver:
         self.u_measured = u_measured - np.mean(u_measured)
     
     def _params_to_sources(self, params: np.ndarray) -> List[Tuple[Tuple[float, float], float]]:
-        """Convert optimization parameters to source list."""
+        """Convert optimization parameters to source list.
+        
+        Parameters layout: [x0, y0, x1, y1, ..., x_{n-1}, y_{n-1}, q0, q1, ..., q_{n-1}]
+        (all positions first, then all intensities)
+        
+        Zero-sum constraint enforced by centering intensities.
+        """
+        n = self.n_sources
         sources = []
-        for i in range(self.n_sources - 1):
-            sources.append(((params[3*i], params[3*i+1]), params[3*i+2]))
-        # Last source: position from params, intensity from compatibility
-        x_last, y_last = params[3*(self.n_sources-1)], params[3*(self.n_sources-1)+1]
-        q_last = -sum(q for _, q in sources)
-        sources.append(((x_last, y_last), q_last))
+        
+        # Extract positions
+        positions = [(params[2*i], params[2*i + 1]) for i in range(n)]
+        
+        # Extract intensities and center them (enforces zero-sum)
+        intensities = np.array([params[2*n + i] for i in range(n)])
+        intensities = intensities - np.mean(intensities)  # Centering enforces Σq = 0
+        
+        for i in range(n):
+            sources.append((positions[i], intensities[i]))
+        
         return sources
     
     def _objective(self, params: np.ndarray) -> float:
         """Objective function: ||u_forward - u_measured||²"""
         sources = self._params_to_sources(params)
         
-        # Check all sources are inside the disk
+        # Soft penalty for sources outside the disk (allows gradient-based escape)
+        penalty = 0.0
         for (x, y), _ in sources:
-            if x**2 + y**2 >= 0.9**2: 
-                return 1e10  # Penalty for sources outside domain
+            r = np.sqrt(x**2 + y**2)
+            if r >= 0.9:
+                penalty += 1000.0 * (r - 0.9)**2
         
         u = self.forward.solve(sources)
         misfit = np.sum((u - self.u_measured)**2)
         self.history.append(misfit)
-        return misfit
+        return misfit + penalty
     
     def _get_initial_guess(self, init_from: str, seed: int) -> List[float]:
         """Generate initial guess for optimization."""
@@ -646,23 +660,26 @@ class AnalyticalNonlinearInverseSolver:
         
         if init_from == 'random' or seed > 0:
             np.random.seed(42 + seed)
+            # Positions first
             for i in range(n):
-                r = 0.5 + 0.35 * np.random.rand()  # r in [0.5, 0.85] for better conditioning
+                r = 0.5 + 0.35 * np.random.rand()  # r in [0.5, 0.85]
                 angle = 2 * np.pi * np.random.rand()
                 x0.extend([r * np.cos(angle), r * np.sin(angle)])
-                if i < n - 1:
-                    x0.append(np.random.randn())
+            # Then intensities
+            for i in range(n):
+                x0.append(np.random.randn())
         else:
             # Symmetric initial guess on circle
             for i in range(n):
                 angle = 2 * np.pi * i / n
                 x0.extend([0.5 * np.cos(angle), 0.5 * np.sin(angle)])
-                if i < n - 1: 
-                    x0.append(1.0 if i % 2 == 0 else -1.0)
+            # Then intensities
+            for i in range(n):
+                x0.append(1.0 if i % 2 == 0 else -1.0)
         
         return x0
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200,
+    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500,
               n_restarts: int = 1, init_from: str = 'circle') -> InverseResult:
         """
         Solve the nonlinear inverse problem.
@@ -693,19 +710,25 @@ class AnalyticalNonlinearInverseSolver:
         self.history = []
         n = self.n_sources
         
-        # Bounds: positions in disk, intensities unbounded but reasonable
+        # Bounds: all positions first, then all intensities (centering layout)
         bounds = []
         for i in range(n):
-            bounds.extend([(-0.85, 0.85), (-0.85, 0.85)])
-            if i < n - 1: 
-                bounds.append((-5.0, 5.0))
+            bounds.append((-0.85, 0.85))  # x
+            bounds.append((-0.85, 0.85))  # y
+        for i in range(n):
+            bounds.append((-5.0, 5.0))    # intensity
         
         best_result = None
         best_fun = np.inf
         
         if method == 'differential_evolution':
-            result = differential_evolution(self._objective, bounds, maxiter=maxiter, 
-                                           seed=42, polish=True, workers=1)
+            result = differential_evolution(
+                self._objective, bounds, 
+                maxiter=max(1000, maxiter),  # At least 1000 for 3n params
+                seed=42, polish=True, workers=1,
+                mutation=(0.5, 1.0),
+                recombination=0.7
+            )
             best_result = result
             
         elif method == 'basinhopping':

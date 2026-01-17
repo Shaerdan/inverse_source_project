@@ -1394,10 +1394,10 @@ class ConformalNonlinearInverseSolver:
         # Compute forward solution
         u_computed = self.forward.solve(sources)
         
-        # Residual
-        residual = np.linalg.norm(u_computed - u_meas)
+        # Residual SQUARED (critical fix - was returning norm, not norm²!)
+        residual_sq = np.sum((u_computed - u_meas)**2)
         
-        return residual
+        return residual_sq
     
     def _generate_valid_initial_guess(self, bounds: list, seed: int) -> np.ndarray:
         """
@@ -1482,17 +1482,19 @@ class ConformalNonlinearInverseSolver:
             bounds.append((x_min, x_max))  # x
             bounds.append((y_min, y_max))  # y
         for _ in range(n):
-            bounds.append((-2.0, 2.0))  # intensity
+            bounds.append((-5.0, 5.0))  # intensity (fixed: was -2.0, 2.0 - too tight!)
         
         if method == 'differential_evolution':
             result = differential_evolution(
                 lambda p: self._objective(p, u_meas),
                 bounds,
                 seed=seed,
-                maxiter=200,
-                tol=1e-6,
+                maxiter=1000,      # Fixed: was 200 - too low for 3n params!
+                tol=1e-8,          # Fixed: was 1e-6
                 polish=True,
-                workers=1
+                workers=1,
+                mutation=(0.5, 1.0),
+                recombination=0.7
             )
             params = result.x
             residual = result.fun
@@ -1527,7 +1529,7 @@ class ConformalNonlinearInverseSolver:
                     x0,
                     method='L-BFGS-B',
                     bounds=bounds,
-                    options={'maxiter': 500}
+                    options={'maxiter': 1000}  # Fixed: was 500
                 )
                 
                 if result.fun < best_residual:

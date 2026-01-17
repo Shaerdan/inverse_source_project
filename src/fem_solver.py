@@ -1212,9 +1212,9 @@ class FEMNonlinearInverseSolver:
         
         return misfit + penalty
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 200, 
+    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500, 
               n_restarts: int = 5, init_from: str = 'random',
-              intensity_bounds: tuple = (-2.0, 2.0)) -> InverseResult:
+              intensity_bounds: tuple = (-5.0, 5.0)) -> InverseResult:
         """
         Solve the nonlinear inverse problem.
         
@@ -1230,7 +1230,7 @@ class FEMNonlinearInverseSolver:
             'circle' - sources on circle (default)
             'random' - random positions
         intensity_bounds : tuple
-            Bounds for source intensities (default: (-2.0, 2.0))
+            Bounds for source intensities (default: (-5.0, 5.0))
             Tighter bounds improve convergence for well-separated sources.
         """
         if self.u_measured is None:
@@ -1253,8 +1253,13 @@ class FEMNonlinearInverseSolver:
         
         # For global optimizers, just run once
         if method == 'differential_evolution':
-            result = differential_evolution(self._objective, bounds, maxiter=maxiter, 
-                                           seed=42, polish=True, workers=1)
+            result = differential_evolution(
+                self._objective, bounds, 
+                maxiter=max(1000, maxiter),  # At least 1000 for 3n params
+                seed=42, polish=True, workers=1,
+                mutation=(0.5, 1.0),
+                recombination=0.7
+            )
             best_result = result
         elif method == 'basinhopping':
             from scipy.optimize import basinhopping
