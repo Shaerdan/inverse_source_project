@@ -23,7 +23,44 @@ from time import time
 
 
 # =============================================================================
-# SENSOR LOCATION UTILITIES
+# DOMAIN INTEGRATION - Use unified domain module
+# =============================================================================
+
+def _get_domain_module():
+    """Import domains module with fallback."""
+    try:
+        from . import domains
+        return domains
+    except ImportError:
+        import domains
+        return domains
+
+
+def _extract_domain_params(domain_type: str, domain_params: dict) -> dict:
+    """Convert old-style domain_params dict to new Domain kwargs."""
+    if not domain_params:
+        return {}
+    
+    if domain_type == 'ellipse':
+        return {'a': domain_params.get('a', 2.0), 
+                'b': domain_params.get('b', 1.0)}
+    elif domain_type == 'star':
+        return {'n_petals': domain_params.get('n_petals', 5),
+                'amplitude': domain_params.get('amplitude', 0.3)}
+    elif domain_type == 'square':
+        return {'half_width': domain_params.get('half_width', 1.0)}
+    elif domain_type == 'polygon':
+        if 'vertices' in domain_params:
+            return {'vertices': domain_params['vertices']}
+    elif domain_type == 'brain':
+        return {}
+    elif domain_type == 'disk':
+        return {'radius': domain_params.get('radius', 1.0)}
+    return {}
+
+
+# =============================================================================
+# SENSOR LOCATION UTILITIES - Now using domains.py
 # =============================================================================
 
 def get_sensor_locations(domain_type: str, domain_params: dict = None, 
@@ -47,43 +84,10 @@ def get_sensor_locations(domain_type: str, domain_params: dict = None,
     locations : array, shape (n_sensors, 2)
         Sensor coordinates on the boundary
     """
-    try:
-        from .mesh import (get_disk_sensor_locations, get_ellipse_sensor_locations, 
-                          get_polygon_sensor_locations, get_brain_boundary)
-    except ImportError:
-        from mesh import (get_disk_sensor_locations, get_ellipse_sensor_locations, 
-                         get_polygon_sensor_locations, get_brain_boundary)
-    
-    if domain_type == 'disk':
-        return get_disk_sensor_locations(n_sensors, radius=1.0)
-    
-    elif domain_type == 'ellipse':
-        a = domain_params.get('a', 2.0) if domain_params else 2.0
-        b = domain_params.get('b', 1.0) if domain_params else 1.0
-        return get_ellipse_sensor_locations(a, b, n_sensors)
-    
-    elif domain_type == 'star':
-        n_petals = domain_params.get('n_petals', 5) if domain_params else 5
-        amplitude = domain_params.get('amplitude', 0.3) if domain_params else 0.3
-        n_v = 100
-        theta_v = np.linspace(0, 2*np.pi, n_v, endpoint=False)
-        r_v = 1.0 + amplitude * np.cos(n_petals * theta_v)
-        vertices = [(r_v[i] * np.cos(theta_v[i]), r_v[i] * np.sin(theta_v[i])) for i in range(n_v)]
-        return get_polygon_sensor_locations(vertices, n_sensors)
-    
-    elif domain_type == 'square':
-        vertices = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
-        return get_polygon_sensor_locations(vertices, n_sensors)
-    
-    elif domain_type == 'polygon':
-        vertices = domain_params.get('vertices') if domain_params else [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]
-        return get_polygon_sensor_locations(vertices, n_sensors)
-    
-    elif domain_type == 'brain':
-        return get_brain_boundary(n_points=n_sensors)
-    
-    else:
-        raise ValueError(f"Unknown domain type: {domain_type}")
+    domains = _get_domain_module()
+    params = _extract_domain_params(domain_type, domain_params)
+    domain = domains.get_domain(domain_type, **params)
+    return domain.get_sensor_locations(n_sensors)
 
 
 @dataclass
@@ -2439,7 +2443,8 @@ def compute_distance_to_boundary(point: Tuple[float, float], domain_type: str,
 def create_domain_sources(domain_type: str, domain_params: dict = None,
                           n_sources: int = 4, 
                           min_boundary_distance: float = 0.15,
-                          max_boundary_distance: float = 0.35) -> List[Tuple[Tuple[float, float], float]]:
+                          max_boundary_distance: float = 0.35,
+                          seed: int = 42) -> List[Tuple[Tuple[float, float], float]]:
     """
     Create test sources appropriate for a given domain.
     
@@ -2461,128 +2466,19 @@ def create_domain_sources(domain_type: str, domain_params: dict = None,
         Minimum distance from boundary (as fraction of domain size)
     max_boundary_distance : float
         Maximum distance from boundary (as fraction of domain size)
+    seed : int
+        Random seed for reproducibility
+        
+    Returns
+    -------
+    sources : List[((x, y), intensity)]
     """
-    if domain_type == 'disk':
-        # For unit disk: optimal r ∈ [0.65, 0.85] (distance from boundary 0.15-0.35)
-        r_opt = 1.0 - (min_boundary_distance + max_boundary_distance) / 2  # ~0.75
-        angles = np.linspace(0, 2*np.pi, n_sources, endpoint=False)
-        sources = []
-        for i, theta in enumerate(angles):
-            x, y = r_opt * np.cos(theta), r_opt * np.sin(theta)
-            intensity = 1.0 if i % 2 == 0 else -1.0
-            sources.append(((x, y), intensity))
-        # Adjust last intensity for sum=0
-        total = sum(s[1] for s in sources)
-        if abs(total) > 1e-10:
-            sources[-1] = (sources[-1][0], sources[-1][1] - total)
-        return sources
+    domains = _get_domain_module()
+    params = _extract_domain_params(domain_type, domain_params)
+    domain = domains.get_domain(domain_type, **params)
     
-    elif domain_type == 'ellipse':
-        a = domain_params.get('a', 2.0) if domain_params else 2.0
-        b = domain_params.get('b', 1.0) if domain_params else 1.0
-        # Place at optimal normalized radius
-        r_norm_opt = 1.0 - (min_boundary_distance + max_boundary_distance) / 2  # ~0.75
-        angles = np.linspace(0, 2*np.pi, n_sources, endpoint=False) + 0.3  # Offset to avoid axes
-        sources = []
-        for i, theta in enumerate(angles):
-            x = r_norm_opt * a * np.cos(theta)
-            y = r_norm_opt * b * np.sin(theta)
-            intensity = 1.0 if i % 2 == 0 else -1.0
-            sources.append(((x, y), intensity))
-        total = sum(s[1] for s in sources)
-        if abs(total) > 1e-10:
-            sources[-1] = (sources[-1][0], sources[-1][1] - total)
-        return sources
-    
-    elif domain_type == 'star':
-        # Star: r(θ) = 1 + amplitude*cos(n*θ), inner radius ~0.7, outer ~1.3
-        # For localization, place sources at r where they're 0.15-0.35 from boundary
-        n_petals = domain_params.get('n_petals', 5) if domain_params else 5
-        amplitude = domain_params.get('amplitude', 0.3) if domain_params else 0.3
-        
-        # Average boundary radius is 1.0, optimal source radius ~0.7 (0.3 from boundary)
-        target_depth = (min_boundary_distance + max_boundary_distance) / 2  # ~0.25
-        angles = np.linspace(0, 2*np.pi, n_sources, endpoint=False)
-        sources = []
-        for i, theta in enumerate(angles):
-            # Local boundary radius at this angle
-            r_boundary = 1.0 + amplitude * np.cos(n_petals * theta)
-            r_source = r_boundary - target_depth  # Place at target depth from boundary
-            r_source = max(0.2, r_source)  # Don't go too close to center
-            x, y = r_source * np.cos(theta), r_source * np.sin(theta)
-            intensity = 1.0 if i % 2 == 0 else -1.0
-            sources.append(((x, y), intensity))
-        total = sum(s[1] for s in sources)
-        if abs(total) > 1e-10:
-            sources[-1] = (sources[-1][0], sources[-1][1] - total)
-        return sources
-    
-    elif domain_type == 'square':
-        # Square [-1,1]²: place sources at distance ~0.25 from boundary
-        # That means at positions ±0.75 from center
-        offset = 1.0 - (min_boundary_distance + max_boundary_distance) / 2  # ~0.75
-        return [
-            ((-offset, offset), 1.0),
-            ((offset, offset), 1.0),
-            ((-offset, -offset), -1.0),
-            ((offset, -offset), -1.0),
-        ]
-    
-    elif domain_type == 'rectangle':
-        hw = domain_params.get('half_width', 1.0) if domain_params else 1.0
-        hh = domain_params.get('half_height', 1.0) if domain_params else 1.0
-        depth = (min_boundary_distance + max_boundary_distance) / 2
-        offset_x = hw * (1 - depth/hw)
-        offset_y = hh * (1 - depth/hh)
-        return [
-            ((-offset_x, offset_y), 1.0),
-            ((offset_x, offset_y), 1.0),
-            ((-offset_x, -offset_y), -1.0),
-            ((offset_x, -offset_y), -1.0),
-        ]
-    
-    elif domain_type == 'polygon':
-        # L-shaped polygon: vertices at (0,0), (2,0), (2,1), (1,1), (1,2), (0,2)
-        # Interior centroid is roughly (0.75, 0.75)
-        # Place sources ~0.25 from edges
-        vertices = domain_params.get('vertices') if domain_params else [(0,0), (2,0), (2,1), (1,1), (1,2), (0,2)]
-        verts = np.array(vertices)
-        
-        # Compute centroid
-        cx = np.mean(verts[:, 0])
-        cy = np.mean(verts[:, 1])
-        
-        # For L-shape: (0.75, 0.75) is centroid, place sources in both arms
-        # with good separation and proper depth from boundary
-        if len(vertices) == 6:  # L-shape
-            return [
-                ((0.3, 0.3), 1.0),   # Lower arm, near boundary
-                ((1.7, 0.3), 1.0),   # Lower arm, near boundary  
-                ((0.3, 1.7), -1.0),  # Upper arm, near boundary
-                ((0.7, 0.7), -1.0),  # Near corner, more central
-            ]
-        else:
-            # Generic polygon: place at scaled centroid positions
-            angles = np.linspace(0, 2*np.pi, n_sources, endpoint=False)
-            sources = []
-            for i, theta in enumerate(angles):
-                x = cx + 0.3 * np.cos(theta)
-                y = cy + 0.3 * np.sin(theta)
-                intensity = 1.0 if i % 2 == 0 else -1.0
-                sources.append(((x, y), intensity))
-            return sources
-    
-    elif domain_type == 'brain':
-        # Brain domain is roughly x in [-1.1, 1.1], y in [-0.6, 0.7]
-        # Place sources at ~0.25 from boundary
-        return [
-            ((-0.6, 0.3), 1.0),   # Left frontal, close to boundary
-            ((0.6, 0.3), 1.0),    # Right frontal, close to boundary
-            ((-0.5, -0.25), -1.0), # Left temporal
-            ((0.5, -0.25), -1.0),  # Right temporal
-        ]
-    else:
-        raise ValueError(f"Unknown domain type: {domain_type}")
+    depth_range = (min_boundary_distance, max_boundary_distance)
+    return domain.generate_sources(n_sources=n_sources, seed=seed, depth_range=depth_range)
 
 
 def get_conformal_map(domain_type: str, domain_params: dict = None):
@@ -3431,19 +3327,19 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                 optimizers = [('L-BFGS-B', n_restarts), ('differential_evolution', 1)]
             
             for opt, opt_restarts in optimizers:
-                            if verbose:
-                                label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
-                                print(f"\nRunning Analytical Nonlinear ({label})...")
-                            try:
-                                result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources,
-                                                           optimizer=opt, n_restarts=opt_restarts, seed=seed,
-                                                           sensor_locations=sensor_locations)
-                                results.append(result)
-                                if verbose:
-                                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-                            except Exception as e:
-                                if verbose:
-                                    print(f"  Failed: {e}")
+                if verbose:
+                    label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
+                    print(f"\nRunning Analytical Nonlinear ({label})...")
+                try:
+                    result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources,
+                                               optimizer=opt, n_restarts=opt_restarts, seed=seed,
+                                               sensor_locations=sensor_locations)
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM LINEAR ---
         if run_linear:
