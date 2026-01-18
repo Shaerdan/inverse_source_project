@@ -722,16 +722,91 @@ def run_bem_linear(u_measured, sources_true, alpha=1e-4, method='l1',
 
 def run_bem_nonlinear(u_measured, sources_true, n_sources=4, 
                        optimizer='L-BFGS-B', n_restarts=1, seed=42,
-                       sensor_locations: np.ndarray = None) -> ComparisonResult:
+                       sensor_locations: np.ndarray = None,
+                       ipopt_settings: dict = None) -> ComparisonResult:
     """Run analytical nonlinear inverse solver (formerly called BEM).
     
     Parameters
     ----------
+    optimizer : str
+        Optimization method: 'L-BFGS-B', 'differential_evolution', 'trust-constr', or 'IPOPT'
     seed : int
         Random seed for differential_evolution. Critical for reproducibility.
     sensor_locations : array, optional
         Fixed sensor locations. If None, uses evenly spaced on unit circle.
+    ipopt_settings : dict, optional
+        Settings for IPOPT optimizer (max_iter, tol, print_level, n_restarts)
     """
+    t0 = time()
+    
+    # Handle IPOPT separately
+    if optimizer == 'IPOPT':
+        try:
+            from .ipopt_solver import IPOPTNonlinearInverseSolver, check_cyipopt_available
+        except ImportError:
+            from ipopt_solver import IPOPTNonlinearInverseSolver, check_cyipopt_available
+        
+        if not check_cyipopt_available():
+            raise ImportError(
+                "IPOPT optimizer requires cyipopt. Install via: conda install -c conda-forge cyipopt"
+            )
+        
+        # Default IPOPT settings
+        settings = {
+            'n_restarts': 10,
+            'max_iter': 30000,
+            'tol': 1e-12,
+            'print_level': 0
+        }
+        if ipopt_settings:
+            settings.update(ipopt_settings)
+        
+        inverse = IPOPTNonlinearInverseSolver(
+            n_sources=n_sources, 
+            n_boundary=len(u_measured),
+            sensor_locations=sensor_locations
+        )
+        inverse.set_measured_data(u_measured)
+        
+        result = inverse.solve(
+            n_restarts=settings['n_restarts'],
+            max_iter=settings['max_iter'],
+            tol=settings['tol'],
+            print_level=settings['print_level']
+        )
+        
+        # Convert sources
+        sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+        
+        # Compute recovered boundary data using standard forward solver
+        try:
+            from .analytical_solver import AnalyticalForwardSolver
+        except ImportError:
+            from analytical_solver import AnalyticalForwardSolver
+        
+        forward = AnalyticalForwardSolver(len(u_measured), sensor_locations=sensor_locations)
+        u_rec = forward.solve(sources_rec)
+        
+        elapsed = time() - t0
+        
+        u_true = u_measured - np.mean(u_measured)
+        metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+        
+        name = f"Analytical Nonlinear (IPOPT x{settings['n_restarts']})"
+        
+        return ComparisonResult(
+            solver_name=name,
+            method_type='nonlinear',
+            forward_type='bem',
+            position_rmse=metrics['position_rmse'],
+            intensity_rmse=metrics['intensity_rmse'],
+            boundary_residual=metrics['boundary_residual'],
+            time_seconds=elapsed,
+            iterations=result.iterations,
+            sources_recovered=sources_rec
+        )
+    
+    # Original L-BFGS-B / DE / trust-constr path
     try:
         from .analytical_solver import AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
         from .analytical_solver import Source, InverseResult
@@ -739,8 +814,6 @@ def run_bem_nonlinear(u_measured, sources_true, n_sources=4,
         from analytical_solver import AnalyticalNonlinearInverseSolver as BEMNonlinearInverseSolver
         from analytical_solver import Source, InverseResult
     from scipy.optimize import differential_evolution
-    
-    t0 = time()
     
     inverse = BEMNonlinearInverseSolver(n_sources=n_sources, n_boundary=len(u_measured),
                                          sensor_locations=sensor_locations)
@@ -3010,7 +3083,8 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                                  n_restarts: int = 5,
                                  maxiter: int = 2000,
                                  run_nonlinear: bool = True,
-                                 run_linear: bool = True) -> List[ComparisonResult]:
+                                 run_linear: bool = True,
+                                 nonlinear_methods: List[str] = None) -> List[ComparisonResult]:
     """
     Comprehensive comparison of ALL available solvers for any supported domain.
     
@@ -3044,11 +3118,17 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         Random seed for reproducibility
     verbose : bool
         Print progress
+    nonlinear_methods : list, optional
+        Which nonlinear optimizers to run. Options: 'L-BFGS-B', 'IPOPT', 'differential_evolution'
+        Default: ['L-BFGS-B'] (DE is deprecated due to parameterization issues)
         
     Returns
     -------
     results : list of ComparisonResult
     """
+    # Default nonlinear methods (DE deprecated)
+    if nonlinear_methods is None:
+        nonlinear_methods = ['L-BFGS-B']
     if sources_true is None:
         sources_true = create_domain_sources(domain_type, domain_params)
     
@@ -3360,29 +3440,33 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         # DISK: All methods available
         
         # --- ANALYTICAL LINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("ANALYTICAL LINEAR SOLVERS (Disk)")
-            print("="*60)
-        
-        for method in ['l1', 'l2', 'tv']:
-            method_alpha = get_alpha_for_method(alpha, method)
+        if not run_linear:
             if verbose:
-                print(f"\nRunning Analytical Linear ({method.upper()}, α={method_alpha:.1e})...")
-                # Debug: show if we're using optimal alpha
-                if use_auto_alpha and method in optimal_alphas:
-                    print(f"  [Using L-curve optimal: {optimal_alphas[method]:.2e}]")
-            try:
-                result = run_bem_linear(u_measured, sources_true, alpha=method_alpha, method=method,
-                                        sensor_locations=sensor_locations,
-                                        source_resolution=source_resolution)
-                results.append(result)
+                print("\n  (Skipping linear solvers per configuration)")
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print("ANALYTICAL LINEAR SOLVERS (Disk)")
+                print("="*60)
+            
+            for method in ['l1', 'l2', 'tv']:
+                method_alpha = get_alpha_for_method(alpha, method)
                 if verbose:
-                    n_peaks = len(result.peaks) if result.peaks else 0
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Peaks: {n_peaks}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning Analytical Linear ({method.upper()}, α={method_alpha:.1e})...")
+                    # Debug: show if we're using optimal alpha
+                    if use_auto_alpha and method in optimal_alphas:
+                        print(f"  [Using L-curve optimal: {optimal_alphas[method]:.2e}]")
+                try:
+                    result = run_bem_linear(u_measured, sources_true, alpha=method_alpha, method=method,
+                                            sensor_locations=sensor_locations,
+                                            source_resolution=source_resolution)
+                    results.append(result)
+                    if verbose:
+                        n_peaks = len(result.peaks) if result.peaks else 0
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Peaks: {n_peaks}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- ANALYTICAL NONLINEAR ---
         if not run_nonlinear:
@@ -3394,19 +3478,28 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                 print("ANALYTICAL NONLINEAR SOLVERS (Disk)")
                 print("="*60)
             
-            if quick:
-                optimizers = [('L-BFGS-B', n_restarts)]
-            else:
-                optimizers = [('L-BFGS-B', n_restarts), ('differential_evolution', 1)]
+            # Build optimizer list from nonlinear_methods parameter
+            optimizers = []
+            for method in nonlinear_methods:
+                if method == 'L-BFGS-B':
+                    optimizers.append(('L-BFGS-B', n_restarts, None))
+                elif method == 'IPOPT':
+                    optimizers.append(('IPOPT', n_restarts, {'max_iter': maxiter, 'tol': 1e-12}))
+                elif method == 'differential_evolution':
+                    if not quick:  # Skip DE in quick mode
+                        optimizers.append(('differential_evolution', 1, None))
+                elif method == 'trust-constr':
+                    optimizers.append(('trust-constr', n_restarts, None))
             
-            for opt, opt_restarts in optimizers:
+            for opt, opt_restarts, ipopt_settings in optimizers:
                 if verbose:
                     label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
                     print(f"\nRunning Analytical Nonlinear ({label})...")
                 try:
                     result = run_bem_nonlinear(u_measured, sources_true, n_sources=n_sources,
                                                optimizer=opt, n_restarts=opt_restarts, seed=seed,
-                                               sensor_locations=sensor_locations)
+                                               sensor_locations=sensor_locations,
+                                               ipopt_settings=ipopt_settings)
                     results.append(result)
                     if verbose:
                         print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
@@ -3444,7 +3537,12 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                 print("FEM NONLINEAR SOLVERS (Disk)")
                 print("="*60)
             
-            for opt, opt_restarts in optimizers:
+            # Use same optimizer list (but FEM doesn't support IPOPT yet, use L-BFGS-B/DE only)
+            for opt, opt_restarts, _ in optimizers:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for FEM - not yet implemented)")
+                    continue
                 if verbose:
                     label = f"{opt}" + (f" x{opt_restarts}" if opt_restarts > 1 else "")
                     print(f"\nRunning FEM Nonlinear ({label})...")
@@ -3489,7 +3587,7 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         # --- CONFORMAL LINEAR ---
         if verbose:
             print("\n" + "="*60)
-            print("CONFORMAL LINEAR SOLVERS (Ellipse) [Analytical - Joukowsky]")
+            print("CONFORMAL LINEAR SOLVERS (Ellipse) [Semi-Analytical - MFS]")
             print("="*60)
         
         for method in ['l1', 'l2', 'tv']:
@@ -3510,30 +3608,46 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- CONFORMAL NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("CONFORMAL NONLINEAR SOLVERS (Ellipse) [Analytical - Joukowsky]")
-            print("="*60)
-        
-        if quick:
-            optimizers = ['L-BFGS-B']
-        else:
-            optimizers = ['L-BFGS-B', 'differential_evolution']
-        
-        for opt in optimizers:
+        if not run_nonlinear:
             if verbose:
-                print(f"\nRunning Conformal Nonlinear ({opt})...")
-            try:
-                result = run_conformal_nonlinear(u_measured, sources_true, conformal_map,
-                                                  n_sources=n_sources, optimizer=opt, seed=seed,
-                                                  sensor_locations=sensor_locations)
-                result.solver_name = f"Conformal Ellipse Nonlinear ({opt[:8]})"
-                results.append(result)
+                print("\n  (Skipping nonlinear solvers per configuration)")
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print("CONFORMAL NONLINEAR SOLVERS (Ellipse) [Semi-Analytical - MFS]")
+                print("="*60)
+            
+            # Build optimizer list from nonlinear_methods parameter
+            optimizers_simple = []
+            for method in nonlinear_methods:
+                if method == 'L-BFGS-B':
+                    optimizers_simple.append('L-BFGS-B')
+                elif method == 'IPOPT':
+                    optimizers_simple.append('IPOPT')  # TODO: Implement IPOPT for conformal
+                elif method == 'differential_evolution':
+                    if not quick:
+                        optimizers_simple.append('differential_evolution')
+                elif method == 'trust-constr':
+                    optimizers_simple.append('trust-constr')
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning Conformal Nonlinear ({opt})...")
+                try:
+                    result = run_conformal_nonlinear(u_measured, sources_true, conformal_map,
+                                                      n_sources=n_sources, optimizer=opt, seed=seed,
+                                                      sensor_locations=sensor_locations)
+                    result.solver_name = f"Conformal Ellipse Nonlinear ({opt[:8]})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM LINEAR ---
         # Generate FEM-specific measurements using calibrated resolution
@@ -3573,26 +3687,31 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- FEM NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("FEM NONLINEAR SOLVERS (Ellipse) [Numerical]")
-            print("="*60)
-        
-        for opt in optimizers:
+        if run_nonlinear:
             if verbose:
-                print(f"\nRunning FEM Ellipse Nonlinear ({opt})...")
-            try:
-                result = run_fem_ellipse_nonlinear(u_fem_ellipse, sources_true, a, b,
-                                                    n_sources=n_sources, optimizer=opt, seed=seed,
-                                                    resolution=forward_resolution,
-                                                    sensor_locations=sensor_locations,
-                                                    mesh_data=mesh_data_ellipse)
-                results.append(result)
+                print("\n" + "="*60)
+                print("FEM NONLINEAR SOLVERS (Ellipse) [Numerical]")
+                print("="*60)
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for FEM - not yet implemented)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning FEM Ellipse Nonlinear ({opt})...")
+                try:
+                    result = run_fem_ellipse_nonlinear(u_fem_ellipse, sources_true, a, b,
+                                                        n_sources=n_sources, optimizer=opt, seed=seed,
+                                                        resolution=forward_resolution,
+                                                        sensor_locations=sensor_locations,
+                                                        mesh_data=mesh_data_ellipse)
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
     
     elif domain_type == 'star':
         # STAR: Conformal + FEM (using shared mesh for fair comparison)
@@ -3631,7 +3750,7 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         # --- CONFORMAL LINEAR ---
         if verbose:
             print("\n" + "="*60)
-            print("CONFORMAL LINEAR SOLVERS (Star) [Semi-Analytical - Numerical Map]")
+            print("CONFORMAL LINEAR SOLVERS (Star) [Semi-Analytical - MFS]")
             print("="*60)
         
         for method in ['l1', 'l2', 'tv']:
@@ -3652,30 +3771,47 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- CONFORMAL NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("CONFORMAL NONLINEAR SOLVERS (Star) [Semi-Analytical - Numerical Map]")
-            print("="*60)
-        
-        if quick:
-            optimizers = ['L-BFGS-B']
-        else:
-            optimizers = ['L-BFGS-B', 'differential_evolution']
-        
-        for opt in optimizers:
+        if not run_nonlinear:
             if verbose:
-                print(f"\nRunning Conformal Nonlinear ({opt})...")
-            try:
-                result = run_conformal_nonlinear(u_measured, sources_true, conformal_map,
-                                                  n_sources=n_sources, optimizer=opt, seed=seed,
-                                                  sensor_locations=sensor_locations)
-                result.solver_name = f"Conformal Star Nonlinear ({opt[:8]})"
-                results.append(result)
+                print("\n  (Skipping nonlinear solvers per configuration)")
+            optimizers_simple = []  # Empty for later FEM NONLINEAR section
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print("CONFORMAL NONLINEAR SOLVERS (Star) [Semi-Analytical - MFS]")
+                print("="*60)
+            
+            # Build optimizer list from nonlinear_methods parameter
+            optimizers_simple = []
+            for method in nonlinear_methods:
+                if method == 'L-BFGS-B':
+                    optimizers_simple.append('L-BFGS-B')
+                elif method == 'IPOPT':
+                    optimizers_simple.append('IPOPT')
+                elif method == 'differential_evolution':
+                    if not quick:
+                        optimizers_simple.append('differential_evolution')
+                elif method == 'trust-constr':
+                    optimizers_simple.append('trust-constr')
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning Conformal Nonlinear ({opt})...")
+                try:
+                    result = run_conformal_nonlinear(u_measured, sources_true, conformal_map,
+                                                      n_sources=n_sources, optimizer=opt, seed=seed,
+                                                      sensor_locations=sensor_locations)
+                    result.solver_name = f"Conformal Star Nonlinear ({opt[:8]})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM LINEAR (treat star as polygon) ---
         if verbose:
@@ -3714,27 +3850,32 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- FEM NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("FEM NONLINEAR SOLVERS (Star) [Numerical]")
-            print("="*60)
-        
-        for opt in optimizers:
+        if run_nonlinear:
             if verbose:
-                print(f"\nRunning FEM Star Nonlinear ({opt})...")
-            try:
-                result = run_fem_polygon_nonlinear(u_fem_star, sources_true, star_vertices,
-                                                    n_sources=n_sources, optimizer=opt, seed=seed,
-                                                    resolution=forward_resolution,
-                                                    sensor_locations=sensor_locations,
-                                                    mesh_data=mesh_data_star)
-                result.solver_name = f"FEM Star Nonlinear ({opt})"
-                results.append(result)
+                print("\n" + "="*60)
+                print("FEM NONLINEAR SOLVERS (Star) [Numerical]")
+                print("="*60)
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for FEM - not yet implemented)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning FEM Star Nonlinear ({opt})...")
+                try:
+                    result = run_fem_polygon_nonlinear(u_fem_star, sources_true, star_vertices,
+                                                        n_sources=n_sources, optimizer=opt, seed=seed,
+                                                        resolution=forward_resolution,
+                                                        sensor_locations=sensor_locations,
+                                                        mesh_data=mesh_data_star)
+                    result.solver_name = f"FEM Star Nonlinear ({opt})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
     
     elif domain_type in ['square', 'polygon']:
         # POLYGON/SQUARE: Conformal + FEM (using shared mesh for fair comparison)
@@ -3781,9 +3922,9 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         
         # Determine label based on whether map is exact or numerical
         if domain_type == 'square':
-            map_label = "S-C Numerical"  # Square via polygon uses numerical Schwarz-Christoffel
+            map_label = "MFS"  # Square uses MFS-based conformal mapping
         else:
-            map_label = "S-C Numerical"  # General polygon uses numerical S-C
+            map_label = "MFS"  # General polygon uses MFS-based conformal mapping
         
         if verbose:
             print("\n" + "="*60)
@@ -3808,30 +3949,47 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- CONFORMAL NONLINEAR (NEW!) ---
-        if verbose:
-            print("\n" + "="*60)
-            print(f"CONFORMAL NONLINEAR SOLVERS ({domain_type.title()}) [Semi-Analytical - {map_label}]")
-            print("="*60)
-        
-        if quick:
-            optimizers = ['L-BFGS-B']
-        else:
-            optimizers = ['L-BFGS-B', 'differential_evolution']
-        
-        for opt in optimizers:
+        if not run_nonlinear:
             if verbose:
-                print(f"\nRunning Conformal Nonlinear ({opt})...")
-            try:
-                result = run_conformal_nonlinear(u_conformal, sources_true, conformal_map,
-                                                  n_sources=n_sources, optimizer=opt, seed=seed,
-                                                  sensor_locations=sensor_locations)
-                result.solver_name = f"Conformal {domain_type.title()} Nonlinear ({opt[:8]})"
-                results.append(result)
+                print("\n  (Skipping nonlinear solvers per configuration)")
+            optimizers_simple = []  # Empty for later FEM NONLINEAR section
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print(f"CONFORMAL NONLINEAR SOLVERS ({domain_type.title()}) [Semi-Analytical - {map_label}]")
+                print("="*60)
+            
+            # Build optimizer list from nonlinear_methods parameter
+            optimizers_simple = []
+            for method in nonlinear_methods:
+                if method == 'L-BFGS-B':
+                    optimizers_simple.append('L-BFGS-B')
+                elif method == 'IPOPT':
+                    optimizers_simple.append('IPOPT')
+                elif method == 'differential_evolution':
+                    if not quick:
+                        optimizers_simple.append('differential_evolution')
+                elif method == 'trust-constr':
+                    optimizers_simple.append('trust-constr')
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning Conformal Nonlinear ({opt})...")
+                try:
+                    result = run_conformal_nonlinear(u_conformal, sources_true, conformal_map,
+                                                      n_sources=n_sources, optimizer=opt, seed=seed,
+                                                      sensor_locations=sensor_locations)
+                    result.solver_name = f"Conformal {domain_type.title()} Nonlinear ({opt[:8]})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM POLYGON LINEAR ---
         if verbose:
@@ -3859,34 +4017,39 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- FEM POLYGON/SQUARE NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print(f"FEM NONLINEAR SOLVERS ({domain_type.title()}) [Numerical]")
-            print("="*60)
-        
-        for opt in optimizers:
+        if run_nonlinear:
             if verbose:
-                print(f"\nRunning FEM {domain_type.title()} Nonlinear ({opt})...")
-            try:
-                if domain_type == 'square':
-                    # Use from_square for proper square constraint handling
-                    result = run_fem_square_nonlinear(u_measured, sources_true, half_width=1.0,
-                                                       n_sources=n_sources, optimizer=opt, seed=seed,
-                                                       resolution=forward_resolution,
-                                                       sensor_locations=sensor_locations,
-                                                       mesh_data=polygon_mesh_data)
-                else:
-                    result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
-                                                        n_sources=n_sources, optimizer=opt, seed=seed,
-                                                        resolution=forward_resolution,
-                                                        sensor_locations=sensor_locations,
-                                                        mesh_data=polygon_mesh_data)
-                results.append(result)
+                print("\n" + "="*60)
+                print(f"FEM NONLINEAR SOLVERS ({domain_type.title()}) [Numerical]")
+                print("="*60)
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for FEM - not yet implemented)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning FEM {domain_type.title()} Nonlinear ({opt})...")
+                try:
+                    if domain_type == 'square':
+                        # Use from_square for proper square constraint handling
+                        result = run_fem_square_nonlinear(u_measured, sources_true, half_width=1.0,
+                                                           n_sources=n_sources, optimizer=opt, seed=seed,
+                                                           resolution=forward_resolution,
+                                                           sensor_locations=sensor_locations,
+                                                           mesh_data=polygon_mesh_data)
+                    else:
+                        result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
+                                                            n_sources=n_sources, optimizer=opt, seed=seed,
+                                                            resolution=forward_resolution,
+                                                            sensor_locations=sensor_locations,
+                                                            mesh_data=polygon_mesh_data)
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
     
     elif domain_type == 'brain':
         # BRAIN: Conformal + FEM (using shared mesh for fair comparison)
@@ -3931,7 +4094,7 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         
         if verbose:
             print("\n" + "="*60)
-            print("CONFORMAL LINEAR SOLVERS (Brain) [Semi-Analytical - Numerical Map]")
+            print("CONFORMAL LINEAR SOLVERS (Brain) [Semi-Analytical - MFS]")
             print("="*60)
         
         for method in ['l1', 'l2', 'tv']:
@@ -3952,30 +4115,47 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- CONFORMAL NONLINEAR (NEW!) ---
-        if verbose:
-            print("\n" + "="*60)
-            print("CONFORMAL NONLINEAR SOLVERS (Brain) [Semi-Analytical - Numerical Map]")
-            print("="*60)
-        
-        if quick:
-            optimizers = ['L-BFGS-B']
-        else:
-            optimizers = ['L-BFGS-B', 'differential_evolution']
-        
-        for opt in optimizers:
+        if not run_nonlinear:
             if verbose:
-                print(f"\nRunning Conformal Brain Nonlinear ({opt})...")
-            try:
-                result = run_conformal_nonlinear(u_conformal, sources_true, conformal_map,
-                                                  n_sources=n_sources, optimizer=opt, seed=seed,
-                                                  sensor_locations=sensor_locations)
-                result.solver_name = f"Conformal Brain Nonlinear ({opt[:8]})"
-                results.append(result)
+                print("\n  (Skipping nonlinear solvers per configuration)")
+            optimizers_simple = []  # Empty for later FEM NONLINEAR section
+        else:
+            if verbose:
+                print("\n" + "="*60)
+                print("CONFORMAL NONLINEAR SOLVERS (Brain) [Semi-Analytical - MFS]")
+                print("="*60)
+            
+            # Build optimizer list from nonlinear_methods parameter
+            optimizers_simple = []
+            for method in nonlinear_methods:
+                if method == 'L-BFGS-B':
+                    optimizers_simple.append('L-BFGS-B')
+                elif method == 'IPOPT':
+                    optimizers_simple.append('IPOPT')
+                elif method == 'differential_evolution':
+                    if not quick:
+                        optimizers_simple.append('differential_evolution')
+                elif method == 'trust-constr':
+                    optimizers_simple.append('trust-constr')
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning Conformal Brain Nonlinear ({opt})...")
+                try:
+                    result = run_conformal_nonlinear(u_conformal, sources_true, conformal_map,
+                                                      n_sources=n_sources, optimizer=opt, seed=seed,
+                                                      sensor_locations=sensor_locations)
+                    result.solver_name = f"Conformal Brain Nonlinear ({opt[:8]})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
         
         # --- FEM BRAIN LINEAR ---
         if verbose:
@@ -4005,27 +4185,32 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                     print(f"  Failed: {e}")
         
         # --- FEM BRAIN NONLINEAR ---
-        if verbose:
-            print("\n" + "="*60)
-            print("FEM NONLINEAR SOLVERS (Brain) [Numerical]")
-            print("="*60)
-        
-        for opt in optimizers:
+        if run_nonlinear:
             if verbose:
-                print(f"\nRunning FEM Brain Nonlinear ({opt})...")
-            try:
-                result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
-                                                    n_sources=n_sources, optimizer=opt, seed=seed,
-                                                    resolution=forward_resolution,
-                                                    sensor_locations=sensor_locations,
-                                                    mesh_data=brain_mesh_data)
-                result.solver_name = f"FEM Brain Nonlinear ({opt})"
-                results.append(result)
+                print("\n" + "="*60)
+                print("FEM NONLINEAR SOLVERS (Brain) [Numerical]")
+                print("="*60)
+            
+            for opt in optimizers_simple:
+                if opt == 'IPOPT':
+                    if verbose:
+                        print(f"\n  (Skipping IPOPT for FEM - not yet implemented)")
+                    continue
                 if verbose:
-                    print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
-            except Exception as e:
-                if verbose:
-                    print(f"  Failed: {e}")
+                    print(f"\nRunning FEM Brain Nonlinear ({opt})...")
+                try:
+                    result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
+                                                        n_sources=n_sources, optimizer=opt, seed=seed,
+                                                        resolution=forward_resolution,
+                                                        sensor_locations=sensor_locations,
+                                                        mesh_data=brain_mesh_data)
+                    result.solver_name = f"FEM Brain Nonlinear ({opt})"
+                    results.append(result)
+                    if verbose:
+                        print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Failed: {e}")
     
     return results
 

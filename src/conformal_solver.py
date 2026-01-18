@@ -15,22 +15,32 @@ using conformal mapping. The key theoretical result (Theorem 6.3 in the docs):
 
 Supported Domains
 -----------------
+All domains now use MFS (Method of Fundamental Solutions) based conformal mapping:
+
 1. **Disk**: Identity map (trivial)
-2. **Ellipse**: Inverse Joukowsky transformation (explicit)
-3. **Rectangle**: Schwarz-Christoffel with elliptic integrals (explicit)
-4. **Regular Polygon**: Schwarz-Christoffel with known prevertices
-5. **General Polygon**: Schwarz-Christoffel with numerical prevertices
-6. **Arbitrary Smooth Domain**: Numerical conformal mapping via Fornberg/Kerzman-Stein
+2. **Ellipse**: MFS-based conformal map (replaces Joukowsky to avoid branch cut issues)
+3. **Rectangle**: MFS-based conformal map (replaces S-C with elliptic integrals)
+4. **Square**: MFS-based conformal map
+5. **General Polygon**: MFS-based conformal map
+6. **Star-shaped domains**: MFS-based conformal map
+7. **Brain-like domains**: MFS-based conformal map
+8. **Arbitrary Smooth Domain**: MFS-based conformal map
 
 The Solution Recipe
 -------------------
 For ANY domain Ω:
-1. Obtain conformal map f: Ω → D (explicit or numerical)
+1. Obtain conformal map f: Ω → D via MFS (solves Laplace equation)
 2. Map evaluation points: w = f(z)
 3. Map source positions: wₖ = f(zₖ)  
 4. Compute: u(z) = Σ qₖ G_D(w, wₖ)
 
 That's it! No new PDEs to solve.
+
+Implementation Notes
+--------------------
+- MFSConformalMap: Core implementation using Method of Fundamental Solutions
+- EllipseMap: Legacy Joukowsky implementation (deprecated, has branch cut issues)
+- All domain-specific classes (RectangleMap, PolygonMap, etc.) now internally use MFSConformalMap
 
 References
 ----------

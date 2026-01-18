@@ -496,14 +496,17 @@ Inverse Methods (Linear/Distributed):
   - TV-CP: Piecewise constant via Chambolle-Pock
 
 Inverse Methods (Nonlinear/Continuous):
-  - L-BFGS-B: Local optimizer (fast, may get stuck)
-  - differential_evolution: Global optimizer (slower, more robust)
-  - basinhopping: Global with local polish
+  - L-BFGS-B: Local optimizer with multistart (recommended)
+  - IPOPT: Interior point optimizer (requires cyipopt, MATLAB-equivalent)
+  - differential_evolution: Global optimizer (deprecated)
 
-Domain Support:
+Domain Support (all using MFS-based conformal mapping):
   - Unit disk (analytical)
-  - Ellipse (Joukowsky map)
-  - Star-shaped domains (numerical conformal map)
+  - Ellipse (MFS conformal map)
+  - Star-shaped domains (MFS conformal map)
+  - Square/Rectangle (MFS conformal map)
+  - General polygons (MFS conformal map)
+  - Brain-like domains (MFS conformal map)
 
 For more information:
   - Documentation: docs/main.pdf
@@ -706,10 +709,19 @@ def run_compare_multi_domain(args):
         
         # Determine which solvers to run
         run_nonlinear = True
+        run_linear = True
+        nonlinear_methods = ['L-BFGS-B']  # Default: only L-BFGS-B (DE is deprecated)
+        
         if solver_config:
             run_nonlinear = solver_config.run_nonlinear
+            run_linear = solver_config.run_linear
+            nonlinear_methods = solver_config.nonlinear_methods
+        
+        # Command-line overrides
         if args.no_nonlinear:
             run_nonlinear = False
+        if getattr(args, 'no_linear', False):
+            run_linear = False
         
         # Run comparison
         try:
@@ -726,7 +738,9 @@ def run_compare_multi_domain(args):
                 verbose=True,
                 n_restarts=n_restarts,
                 maxiter=maxiter,
-                run_nonlinear=run_nonlinear
+                run_nonlinear=run_nonlinear,
+                run_linear=run_linear,
+                nonlinear_methods=nonlinear_methods
             )
             
             all_results[domain] = {

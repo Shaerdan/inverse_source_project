@@ -60,7 +60,7 @@ License
 MIT License
 """
 
-__version__ = "7.30.0"  # Fixed source generation: r in [0.5, 0.85] for better conditioning, well-separated test sources
+__version__ = "7.47.0"  # Added IPOPT-based nonlinear solver (cyipopt) for MATLAB-equivalent optimization
 __author__ = "Serdan"
 
 # =============================================================================
@@ -148,6 +148,40 @@ from .conformal_solver import (
     create_conformal_map,
     solve_forward_conformal,
 )
+
+# =============================================================================
+# IPOPT SOLVER (Interior Point Optimizer - matches MATLAB fmincon)
+# =============================================================================
+try:
+    from .ipopt_solver import (
+        # Main solvers
+        IPOPTNonlinearInverseSolver,
+        IPOPTConformalInverseSolver,
+        # Problem classes (for advanced users)
+        IPOPTDiskProblem,
+        IPOPTConformalProblem,
+        # Utilities
+        check_cyipopt_available,
+        get_ipopt_version,
+    )
+    HAS_IPOPT = True
+except ImportError:
+    HAS_IPOPT = False
+    # Create placeholder classes that raise helpful errors
+    class IPOPTNonlinearInverseSolver:
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "cyipopt not available. Install via: conda install -c conda-forge cyipopt"
+            )
+    class IPOPTConformalInverseSolver:
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "cyipopt not available. Install via: conda install -c conda-forge cyipopt"
+            )
+    def check_cyipopt_available():
+        return False
+    def get_ipopt_version():
+        return None
 
 # =============================================================================
 # REGULARIZATION METHODS
@@ -261,6 +295,12 @@ from . import config
 from . import utils
 from . import comparison
 
+# IPOPT solver module (optional - requires cyipopt)
+try:
+    from . import ipopt_solver
+except ImportError:
+    pass  # cyipopt not available
+
 # =============================================================================
 # PUBLIC API
 # =============================================================================
@@ -311,6 +351,13 @@ __all__ = [
     'ConformalNonlinearInverseSolver',
     'create_ellipse_solver',
     'create_star_solver',
+    
+    # === IPOPT SOLVER ===
+    'IPOPTNonlinearInverseSolver',
+    'IPOPTConformalInverseSolver',
+    'check_cyipopt_available',
+    'get_ipopt_version',
+    'HAS_IPOPT',
     
     # === DATA CLASSES ===
     'Source',
