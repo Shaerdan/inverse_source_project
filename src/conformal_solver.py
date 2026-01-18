@@ -1370,8 +1370,13 @@ class ConformalNonlinearInverseSolver:
         self.forward = ConformalForwardSolver(conformal_map, n_boundary, 
                                                sensor_locations=sensor_locations)
     
-    def _objective(self, params: np.ndarray, u_meas: np.ndarray) -> float:
-        """Objective function: ||u_computed - u_measured||²."""
+    def _objective_misfit(self, params: np.ndarray, u_meas: np.ndarray) -> float:
+        """
+        Pure misfit objective: ||u_computed - u_measured||²
+        
+        Used with NonlinearConstraint (DE, trust-constr) where constraint
+        is handled separately.
+        """
         n = self.n_sources
         
         # Unpack parameters
@@ -1381,11 +1386,44 @@ class ConformalNonlinearInverseSolver:
         # Enforce zero-sum constraint
         intensities = intensities - np.mean(intensities)
         
-        # Check if positions are inside domain
+        # Build sources list
+        sources = [((positions[k, 0], positions[k, 1]), intensities[k]) 
+                   for k in range(n)]
+        
+        # Compute forward solution
+        u_computed = self.forward.solve(sources)
+        
+        # Residual SQUARED
+        return np.sum((u_computed - u_meas)**2)
+    
+    def _objective_with_barrier(self, params: np.ndarray, u_meas: np.ndarray, mu: float = 1e-6) -> float:
+        """
+        Objective with logarithmic barrier for L-BFGS-B interior point method.
+        
+        f(z) = ||u_computed - u_measured||² - μ * Σ log(1 - |w_k|²)
+        
+        where w_k = conformal_map(z_k) maps source positions to unit disk.
+        """
+        n = self.n_sources
+        
+        # Unpack parameters
+        positions = params[:2*n].reshape(n, 2)
+        intensities = params[2*n:3*n]
+        
+        # Enforce zero-sum constraint
+        intensities = intensities - np.mean(intensities)
+        
+        # Map source positions to unit disk via conformal map
         z_sources = positions[:, 0] + 1j * positions[:, 1]
-        inside = self.map.is_inside(z_sources)
-        if not np.all(inside):
-            return 1e10  # Penalty for outside points
+        w_sources = self.map.to_disk(z_sources)
+        w_abs_sq = np.abs(w_sources)**2
+        
+        # Check if any source is outside (|w| >= 1)
+        if np.any(w_abs_sq >= 1.0):
+            return 1e12
+        
+        # Logarithmic barrier
+        barrier = -mu * np.sum(np.log(1.0 - w_abs_sq))
         
         # Build sources list
         sources = [((positions[k, 0], positions[k, 1]), intensities[k]) 
@@ -1394,10 +1432,26 @@ class ConformalNonlinearInverseSolver:
         # Compute forward solution
         u_computed = self.forward.solve(sources)
         
-        # Residual SQUARED (critical fix - was returning norm, not norm²!)
+        # Residual SQUARED
         residual_sq = np.sum((u_computed - u_meas)**2)
         
-        return residual_sq
+        return residual_sq + barrier
+    
+    def _conformal_constraint(self, params: np.ndarray) -> np.ndarray:
+        """
+        Conformal domain constraint for NonlinearConstraint.
+        
+        Returns array of (1 - |w_k|²) for each source, where w_k = f(z_k).
+        Constraint satisfied when all values > 0 (source inside domain).
+        """
+        n = self.n_sources
+        positions = params[:2*n].reshape(n, 2)
+        
+        z_sources = positions[:, 0] + 1j * positions[:, 1]
+        w_sources = self.map.to_disk(z_sources)
+        w_abs_sq = np.abs(w_sources)**2
+        
+        return 1.0 - w_abs_sq
     
     def _generate_valid_initial_guess(self, bounds: list, seed: int) -> np.ndarray:
         """
@@ -1437,7 +1491,7 @@ class ConformalNonlinearInverseSolver:
         return np.array(x0)
     
     def solve(self, u_meas: np.ndarray, method: str = 'differential_evolution',
-              seed: int = 42, n_restarts: int = 5) -> Tuple[List[Tuple[Tuple[float, float], float]], float]:
+              seed: int = 42, n_restarts: int = 5, mu: float = 1e-6) -> Tuple[List[Tuple[Tuple[float, float], float]], float]:
         """
         Solve nonlinear inverse problem.
         
@@ -1446,11 +1500,17 @@ class ConformalNonlinearInverseSolver:
         u_meas : array
             Measured boundary potential
         method : str
-            Optimization method ('differential_evolution', 'basin_hopping', 'lbfgsb', 'L-BFGS-B')
+            Optimization method:
+            - 'differential_evolution': Global with NonlinearConstraint
+            - 'trust-constr': Local with NonlinearConstraint
+            - 'L-BFGS-B' or 'lbfgsb': Local with log barrier
+            - 'basin_hopping': Global with local polish
         seed : int
             Random seed for reproducibility
         n_restarts : int
-            Number of random restarts for local optimizers (L-BFGS-B)
+            Number of random restarts for local optimizers
+        mu : float
+            Barrier parameter for L-BFGS-B interior point method
         
         Returns
         -------
@@ -1462,35 +1522,37 @@ class ConformalNonlinearInverseSolver:
         n = self.n_sources
         np.random.seed(seed)
         
-        # Get domain bounds from boundary
+        # Get domain bounding box from boundary
         boundary = self.map.boundary_physical(100)
         x_min, x_max = np.real(boundary).min(), np.real(boundary).max()
         y_min, y_max = np.imag(boundary).min(), np.imag(boundary).max()
         
-        # Use small margin per axis (5%) - the is_inside() penalty in _objective()
-        # handles actual domain constraint, so we don't need aggressive shrinking
-        # NOTE: Previous 15% of min-dimension caused issues for non-convex domains
-        # like star where boundary bulges in one direction but not the other
-        x_margin = 0.05 * (x_max - x_min)
-        y_margin = 0.05 * (y_max - y_min)
-        x_min, x_max = x_min + x_margin, x_max - x_margin
-        y_min, y_max = y_min + y_margin, y_max - y_margin
+        # Box bounds that contain the domain (used by DE/trust-constr)
+        # NonlinearConstraint enforces the actual conformal domain shape
+        box_bounds = []
+        for _ in range(n):
+            box_bounds.append((x_min, x_max))  # x
+            box_bounds.append((y_min, y_max))  # y
+        for _ in range(n):
+            box_bounds.append((-5.0, 5.0))  # intensity
         
-        # Bounds: positions + intensities
-        bounds = []
-        for _ in range(n):
-            bounds.append((x_min, x_max))  # x
-            bounds.append((y_min, y_max))  # y
-        for _ in range(n):
-            bounds.append((-5.0, 5.0))  # intensity (fixed: was -2.0, 2.0 - too tight!)
+        # NonlinearConstraint: 1 - |f(z)|² > 0 for each source
+        from scipy.optimize import NonlinearConstraint
+        conformal_constraint = NonlinearConstraint(
+            self._conformal_constraint,
+            0.0,      # lower bound (must be > 0, i.e., inside domain)
+            np.inf    # upper bound
+        )
         
         if method == 'differential_evolution':
+            # DE with NonlinearConstraint
             result = differential_evolution(
-                lambda p: self._objective(p, u_meas),
-                bounds,
+                lambda p: self._objective_misfit(p, u_meas),
+                box_bounds,
+                constraints=conformal_constraint,
                 seed=seed,
-                maxiter=1000,      # Fixed: was 200 - too low for 3n params!
-                tol=1e-8,          # Fixed: was 1e-6
+                maxiter=2000,
+                tol=1e-8,
                 polish=True,
                 workers=1,
                 mutation=(0.5, 1.0),
@@ -1499,37 +1561,68 @@ class ConformalNonlinearInverseSolver:
             params = result.x
             residual = result.fun
             
-        elif method == 'basin_hopping':
-            from scipy.optimize import basinhopping
-            
-            # Initial guess - use rejection sampling to ensure points are inside domain
-            x0 = self._generate_valid_initial_guess(bounds, seed)
-            
-            result = basinhopping(
-                lambda p: self._objective(p, u_meas),
-                x0,
-                niter=50,
-                seed=seed
-            )
-            params = result.x
-            residual = result.fun
-            
-        else:  # L-BFGS-B (with restarts!)
+        elif method == 'trust-constr':
+            # trust-constr with NonlinearConstraint
             from scipy.optimize import minimize as scipy_minimize
             
             best_params = None
             best_residual = np.inf
             
             for restart in range(n_restarts):
-                # Generate new initial guess for each restart
-                x0 = self._generate_valid_initial_guess(bounds, seed + restart)
+                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart)
                 
                 result = scipy_minimize(
-                    lambda p: self._objective(p, u_meas),
+                    lambda p: self._objective_misfit(p, u_meas),
+                    x0,
+                    method='trust-constr',
+                    bounds=box_bounds,
+                    constraints=conformal_constraint,
+                    options={'maxiter': 2000}
+                )
+                
+                if result.fun < best_residual:
+                    best_residual = result.fun
+                    best_params = result.x
+            
+            params = best_params
+            residual = best_residual
+            
+        elif method == 'basin_hopping':
+            from scipy.optimize import basinhopping
+            
+            x0 = self._generate_valid_initial_guess(box_bounds, seed)
+            
+            # Basinhopping with L-BFGS-B using log barrier
+            bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
+            
+            result = basinhopping(
+                lambda p: self._objective_with_barrier(p, u_meas, mu=mu),
+                x0,
+                niter=50,
+                seed=seed,
+                minimizer_kwargs={'method': 'L-BFGS-B', 'bounds': bounds_barrier}
+            )
+            params = result.x
+            residual = result.fun
+            
+        else:  # L-BFGS-B with log barrier
+            from scipy.optimize import minimize as scipy_minimize
+            
+            # Positions UNCONSTRAINED - log barrier handles domain
+            bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
+            
+            best_params = None
+            best_residual = np.inf
+            
+            for restart in range(n_restarts):
+                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart)
+                
+                result = scipy_minimize(
+                    lambda p: self._objective_with_barrier(p, u_meas, mu=mu),
                     x0,
                     method='L-BFGS-B',
-                    bounds=bounds,
-                    options={'maxiter': 1000}  # Fixed: was 500
+                    bounds=bounds_barrier,
+                    options={'maxiter': 2000}
                 )
                 
                 if result.fun < best_residual:

@@ -637,21 +637,56 @@ class AnalyticalNonlinearInverseSolver:
         
         return sources
     
-    def _objective(self, params: np.ndarray) -> float:
-        """Objective function: ||u_forward - u_measured||²"""
+    def _objective_misfit(self, params: np.ndarray) -> float:
+        """
+        Pure misfit objective: ||u_forward - u_measured||²
+        
+        Used with NonlinearConstraint (DE, trust-constr) where constraint
+        is handled separately.
+        """
+        sources = self._params_to_sources(params)
+        u = self.forward.solve(sources)
+        misfit = np.sum((u - self.u_measured)**2)
+        self.history.append(misfit)
+        return misfit
+    
+    def _objective_with_barrier(self, params: np.ndarray, mu: float = 1e-6) -> float:
+        """
+        Objective with logarithmic barrier for L-BFGS-B interior point method.
+        
+        f(x) = ||u_forward - u_measured||² - μ * Σ log(1 - x_i² - y_i²)
+        
+        The log barrier enforces x² + y² < 1 (unit disk constraint).
+        Gradient naturally repels optimizer from boundary.
+        """
         sources = self._params_to_sources(params)
         
-        # Soft penalty for sources outside the disk (allows gradient-based escape)
-        penalty = 0.0
+        # Logarithmic barrier for disk constraint: x² + y² < 1
+        barrier = 0.0
         for (x, y), _ in sources:
-            r = np.sqrt(x**2 + y**2)
-            if r >= 0.9:
-                penalty += 1000.0 * (r - 0.9)**2
+            r_sq = x**2 + y**2
+            if r_sq >= 1.0:
+                return 1e12  # Outside disk
+            barrier -= mu * np.log(1.0 - r_sq)
         
         u = self.forward.solve(sources)
         misfit = np.sum((u - self.u_measured)**2)
         self.history.append(misfit)
-        return misfit + penalty
+        return misfit + barrier
+    
+    def _disk_constraint(self, params: np.ndarray) -> np.ndarray:
+        """
+        Disk constraint function for NonlinearConstraint.
+        
+        Returns array of (1 - x_i² - y_i²) for each source.
+        Constraint satisfied when all values > 0.
+        """
+        n = self.n_sources
+        values = np.zeros(n)
+        for i in range(n):
+            x, y = params[2*i], params[2*i + 1]
+            values[i] = 1.0 - x**2 - y**2
+        return values
     
     def _get_initial_guess(self, init_from: str, seed: int) -> List[float]:
         """Generate initial guess for optimization."""
@@ -680,7 +715,8 @@ class AnalyticalNonlinearInverseSolver:
         return x0
     
     def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500,
-              n_restarts: int = 1, init_from: str = 'circle') -> InverseResult:
+              n_restarts: int = 1, init_from: str = 'circle',
+              mu: float = 1e-6) -> InverseResult:
         """
         Solve the nonlinear inverse problem.
         
@@ -688,16 +724,18 @@ class AnalyticalNonlinearInverseSolver:
         ----------
         method : str
             Optimization method:
-            - 'L-BFGS-B': Local quasi-Newton (fast, may get stuck)
-            - 'differential_evolution': Global stochastic (slower, more robust)
+            - 'L-BFGS-B': Local quasi-Newton with log barrier
+            - 'differential_evolution': Global with NonlinearConstraint
+            - 'trust-constr': Local with NonlinearConstraint
             - 'basinhopping': Global with local polish
-            - 'SLSQP': Local SQP method
         maxiter : int
             Maximum iterations
         n_restarts : int
             Number of random restarts for local optimizers
         init_from : str
             Initial guess type: 'circle' or 'random'
+        mu : float
+            Barrier parameter for L-BFGS-B interior point method
             
         Returns
         -------
@@ -710,41 +748,88 @@ class AnalyticalNonlinearInverseSolver:
         self.history = []
         n = self.n_sources
         
-        # Bounds: all positions first, then all intensities (centering layout)
-        bounds = []
-        for i in range(n):
-            bounds.append((-0.85, 0.85))  # x
-            bounds.append((-0.85, 0.85))  # y
-        for i in range(n):
-            bounds.append((-5.0, 5.0))    # intensity
-        
         best_result = None
         best_fun = np.inf
         
+        # Box bounds: contain the disk [-1, 1] × [-1, 1], intensity [-5, 5]
+        # These are used for DE/trust-constr; the NonlinearConstraint enforces the disk
+        box_bounds = [(-1.0, 1.0)] * (2*n) + [(-5.0, 5.0)] * n
+        
+        # NonlinearConstraint: 1 - x² - y² > 0 for each source (inside disk)
+        from scipy.optimize import NonlinearConstraint
+        disk_constraint = NonlinearConstraint(
+            self._disk_constraint, 
+            0.0,      # lower bound (must be > 0, i.e., inside disk)
+            np.inf    # upper bound (no upper limit)
+        )
+        
         if method == 'differential_evolution':
+            # DE with NonlinearConstraint - no log barrier needed
             result = differential_evolution(
-                self._objective, bounds, 
-                maxiter=max(1000, maxiter),  # At least 1000 for 3n params
-                seed=42, polish=True, workers=1,
+                self._objective_misfit,
+                box_bounds,
+                constraints=disk_constraint,
+                maxiter=max(2000, maxiter),
+                seed=42,
+                polish=True,
+                workers=1,
                 mutation=(0.5, 1.0),
                 recombination=0.7
             )
             best_result = result
             
+        elif method == 'trust-constr':
+            # trust-constr with NonlinearConstraint
+            for restart in range(n_restarts):
+                x0 = self._get_initial_guess(init_from, restart)
+                result = minimize(
+                    self._objective_misfit,
+                    x0,
+                    method='trust-constr',
+                    bounds=box_bounds,
+                    constraints=disk_constraint,
+                    options={'maxiter': maxiter}
+                )
+                if result.fun < best_fun:
+                    best_fun = result.fun
+                    best_result = result
+            
         elif method == 'basinhopping':
             from scipy.optimize import basinhopping
             x0 = self._get_initial_guess(init_from, 0)
-            minimizer_kwargs = {'method': 'L-BFGS-B', 'bounds': bounds}
-            result = basinhopping(self._objective, x0, minimizer_kwargs=minimizer_kwargs,
-                                 niter=maxiter, seed=42)
+            
+            # Basinhopping with L-BFGS-B local optimizer using log barrier
+            # Positions unconstrained (log barrier handles disk)
+            bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
+            minimizer_kwargs = {
+                'method': 'L-BFGS-B', 
+                'bounds': bounds_barrier,
+                'args': (mu,)
+            }
+            result = basinhopping(
+                self._objective_with_barrier, 
+                x0, 
+                minimizer_kwargs=minimizer_kwargs,
+                niter=maxiter, 
+                seed=42
+            )
             best_result = result
             
-        else:
-            # Local optimizer with restarts
+        else:  # L-BFGS-B (default) or other gradient-based
+            # L-BFGS-B with log barrier - positions UNCONSTRAINED
+            # The log barrier gradient repels from boundary
+            bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
+            
             for restart in range(n_restarts):
                 x0 = self._get_initial_guess(init_from, restart)
-                result = minimize(self._objective, x0, method=method, bounds=bounds, 
-                                options={'maxiter': maxiter})
+                result = minimize(
+                    self._objective_with_barrier, 
+                    x0, 
+                    method='L-BFGS-B',
+                    bounds=bounds_barrier,
+                    args=(mu,),
+                    options={'maxiter': maxiter}
+                )
                 if result.fun < best_fun:
                     best_fun = result.fun
                     best_result = result

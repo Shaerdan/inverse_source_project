@@ -746,23 +746,16 @@ def run_bem_nonlinear(u_measured, sources_true, n_sources=4,
                                          sensor_locations=sensor_locations)
     inverse.set_measured_data(u_measured)
     
+    # FIX: Use inverse.solve() for BOTH optimizers to ensure consistent parameterization
+    # Previous code manually created bounds with wrong layout, causing DE to fail
+    np.random.seed(seed)  # For reproducibility in initialization
+    
     if optimizer == 'differential_evolution':
-        # Use explicit seed for reproducibility
-        n = n_sources
-        bounds = []
-        for i in range(n):
-            bounds.extend([(-0.85, 0.85), (-0.85, 0.85)])
-            if i < n - 1: 
-                bounds.append((-5.0, 5.0))
-        
-        inverse.history = []
-        result_de = differential_evolution(inverse._objective, bounds, 
-                                           maxiter=200, seed=seed, polish=True, workers=1)
-        sources = [Source(x, y, q) for (x, y), q in inverse._params_to_sources(result_de.x)]
-        result = InverseResult(sources, np.sqrt(result_de.fun), True, '', 
-                               result_de.nit, inverse.history.copy())
+        # DE needs more iterations for convergence in high-dimensional space
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
     else:
-        result = inverse.solve(method=optimizer, maxiter=200, n_restarts=n_restarts)
+        # L-BFGS-B with multiple restarts
+        result = inverse.solve(method=optimizer, maxiter=500, n_restarts=n_restarts)
     
     elapsed = time() - t0
     
@@ -962,23 +955,16 @@ def run_fem_nonlinear(u_measured, sources_true, n_sources=4,
     # Set measured data directly - no interpolation needed when sensors match!
     inverse.set_measured_data(u_measured)
     
+    # FIX: Use inverse.solve() for BOTH optimizers to ensure consistent parameterization
+    # Previous code manually created bounds with wrong layout, causing DE to fail
+    np.random.seed(seed)  # For reproducibility in initialization
+    
     if optimizer == 'differential_evolution':
-        # Use explicit seed for reproducibility
-        n = n_sources
-        bounds = []
-        for i in range(n):
-            bounds.extend([(-0.8, 0.8), (-0.8, 0.8)])
-            if i < n - 1:
-                bounds.append((-5.0, 5.0))
-        
-        inverse.history = []
-        result_de = differential_evolution(inverse._objective, bounds, 
-                                           maxiter=100, seed=seed, polish=True, workers=1)
-        sources = [Source(x, y, q) for (x, y), q in inverse._params_to_sources(result_de.x)]
-        result = InverseResult(sources, np.sqrt(result_de.fun), True, '', 
-                               result_de.nit, inverse.history.copy())
+        # DE needs more iterations for convergence in high-dimensional space
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
     else:
-        result = inverse.solve(method=optimizer, maxiter=100, n_restarts=n_restarts)
+        # L-BFGS-B with multiple restarts
+        result = inverse.solve(method=optimizer, maxiter=500, n_restarts=n_restarts)
     
     elapsed = time() - t0
     
@@ -1110,9 +1096,9 @@ def run_bem_numerical_nonlinear(u_measured, sources_true, n_sources=4,
     inverse.set_measured_data(u_measured)
     
     if optimizer == 'differential_evolution':
-        result = inverse.solve(method='differential_evolution', maxiter=100)
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
     else:
-        result = inverse.solve(method=optimizer, maxiter=100, n_restarts=n_restarts)
+        result = inverse.solve(method=optimizer, maxiter=500, n_restarts=n_restarts)
     
     elapsed = time() - t0
     
@@ -2349,7 +2335,7 @@ def run_fem_polygon_nonlinear(u_measured, sources_true, vertices, n_sources=4,
     np.random.seed(seed)
     
     if optimizer == 'differential_evolution':
-        result = inverse.solve(method='differential_evolution', maxiter=500)
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
     else:
         result = inverse.solve(method=optimizer, n_restarts=5, maxiter=1000)
     
@@ -2369,6 +2355,93 @@ def run_fem_polygon_nonlinear(u_measured, sources_true, vertices, n_sources=4,
         solver_name=f"FEM Polygon Nonlinear ({optimizer[:8]})",
         method_type='nonlinear',
         forward_type='fem_polygon',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        iterations=result.iterations,
+        sources_recovered=sources_rec
+    )
+
+
+def run_fem_square_nonlinear(u_measured, sources_true, half_width, n_sources=4,
+                              optimizer='differential_evolution', seed=42,
+                              resolution=0.1, sensor_locations=None,
+                              mesh_data=None) -> ComparisonResult:
+    """
+    Run FEM nonlinear inverse solver for square domain using proper from_square factory.
+    
+    This uses the square-specific constraint (min(a-|x|, a-|y|) > 0) and log barrier
+    instead of the generic polygon approach.
+    
+    Parameters
+    ----------
+    u_measured : array
+        Boundary measurements
+    sources_true : list of ((x, y), q)
+        True sources for metric computation
+    half_width : float
+        Half the side length of the square (so domain is [-half_width, half_width]²)
+    n_sources : int
+        Number of sources to recover
+    optimizer : str
+        Optimization method ('differential_evolution', 'trust-constr', 'L-BFGS-B')
+    seed : int
+        Random seed
+    resolution : float
+        FEM mesh element size
+    sensor_locations : array, optional
+        Explicit sensor locations
+    mesh_data : tuple, optional
+        Pre-built mesh data
+    """
+    try:
+        from .fem_solver import FEMNonlinearInverseSolver, FEMForwardSolver
+        from .mesh import create_polygon_mesh
+    except ImportError:
+        from fem_solver import FEMNonlinearInverseSolver, FEMForwardSolver
+        from mesh import create_polygon_mesh
+    
+    t0 = time()
+    
+    # Create square mesh if not provided
+    a = half_width
+    vertices = [(-a, -a), (a, -a), (a, a), (-a, a)]
+    if mesh_data is None:
+        mesh_data = create_polygon_mesh(vertices, resolution, sensor_locations=sensor_locations)
+    
+    # Use from_square to get proper domain_type='square' with correct constraint handling
+    inverse = FEMNonlinearInverseSolver.from_square(half_width, n_sources=n_sources,
+                                                     resolution=resolution, verbose=False,
+                                                     sensor_locations=sensor_locations,
+                                                     mesh_data=mesh_data)
+    inverse.set_measured_data(u_measured)
+    
+    np.random.seed(seed)
+    
+    if optimizer == 'differential_evolution':
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
+    elif optimizer == 'trust-constr':
+        result = inverse.solve(method='trust-constr', n_restarts=5, maxiter=1000)
+    else:
+        result = inverse.solve(method=optimizer, n_restarts=5, maxiter=1000)
+    
+    elapsed = time() - t0
+    
+    sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+    
+    # Forward solve for boundary residual
+    forward = FEMForwardSolver(resolution=resolution, verbose=False, mesh_data=mesh_data)
+    u_rec = forward.solve(sources_rec)
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    return ComparisonResult(
+        solver_name=f"FEM Square Nonlinear ({optimizer[:8]})",
+        method_type='nonlinear',
+        forward_type='fem_square',
         position_rmse=metrics['position_rmse'],
         intensity_rmse=metrics['intensity_rmse'],
         boundary_residual=metrics['boundary_residual'],
@@ -2891,7 +2964,7 @@ def run_fem_ellipse_nonlinear(u_measured, sources_true, a, b, n_sources=4,
     np.random.seed(seed)
     
     if optimizer == 'differential_evolution':
-        result = inverse.solve(method='differential_evolution', maxiter=500)
+        result = inverse.solve(method='differential_evolution', maxiter=2000)
     else:
         result = inverse.solve(method=optimizer, n_restarts=5, maxiter=1000)
     
@@ -3785,7 +3858,7 @@ def compare_all_solvers_general(domain_type: str = 'disk',
                 if verbose:
                     print(f"  Failed: {e}")
         
-        # --- FEM POLYGON NONLINEAR ---
+        # --- FEM POLYGON/SQUARE NONLINEAR ---
         if verbose:
             print("\n" + "="*60)
             print(f"FEM NONLINEAR SOLVERS ({domain_type.title()}) [Numerical]")
@@ -3793,13 +3866,21 @@ def compare_all_solvers_general(domain_type: str = 'disk',
         
         for opt in optimizers:
             if verbose:
-                print(f"\nRunning FEM Polygon Nonlinear ({opt})...")
+                print(f"\nRunning FEM {domain_type.title()} Nonlinear ({opt})...")
             try:
-                result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
-                                                    n_sources=n_sources, optimizer=opt, seed=seed,
-                                                    resolution=forward_resolution,
-                                                    sensor_locations=sensor_locations,
-                                                    mesh_data=polygon_mesh_data)
+                if domain_type == 'square':
+                    # Use from_square for proper square constraint handling
+                    result = run_fem_square_nonlinear(u_measured, sources_true, half_width=1.0,
+                                                       n_sources=n_sources, optimizer=opt, seed=seed,
+                                                       resolution=forward_resolution,
+                                                       sensor_locations=sensor_locations,
+                                                       mesh_data=polygon_mesh_data)
+                else:
+                    result = run_fem_polygon_nonlinear(u_measured, sources_true, vertices,
+                                                        n_sources=n_sources, optimizer=opt, seed=seed,
+                                                        resolution=forward_resolution,
+                                                        sensor_locations=sensor_locations,
+                                                        mesh_data=polygon_mesh_data)
                 results.append(result)
                 if verbose:
                     print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")

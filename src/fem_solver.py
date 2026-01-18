@@ -1133,10 +1133,68 @@ class FEMNonlinearInverseSolver:
         # Create mesh with sensors embedded or reuse provided mesh
         if mesh_data is None:
             mesh_data = create_ellipse_mesh(a, b, resolution, sensor_locations=sensor_locations)
-        bounds = ((-0.85*a, 0.85*a), (-0.85*b, 0.85*b))
+        # Box bounds containing the ellipse (NonlinearConstraint enforces actual ellipse)
+        bounds = ((-a, a), (-b, b))
         return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
                    mesh_data=mesh_data, bounds=bounds,
                    domain_type='ellipse', domain_params={'a': a, 'b': b})
+    
+    @classmethod
+    def from_square(cls, half_width: float, n_sources: int,
+                    resolution: float = 0.1, n_sensors: int = 100,
+                    verbose: bool = False, sensor_locations: np.ndarray = None,
+                    mesh_data: Tuple = None) -> 'FEMNonlinearInverseSolver':
+        """
+        Create solver for square domain [-half_width, half_width]².
+        
+        Parameters
+        ----------
+        half_width : float
+            Half the side length of the square (so side = 2*half_width)
+        n_sources : int
+            Number of sources to recover
+        resolution : float
+            Mesh resolution
+        n_sensors : int
+            Number of boundary sensors
+        sensor_locations : array, optional
+            Explicit sensor locations.
+        mesh_data : tuple, optional
+            Pre-built mesh data to reuse.
+        """
+        a = half_width
+        vertices = [(-a, -a), (a, -a), (a, a), (-a, a)]
+        
+        # Generate sensor locations evenly on square boundary
+        if sensor_locations is None:
+            n_per_side = n_sensors // 4
+            sensor_locations = []
+            # Bottom: (-a, -a) to (a, -a)
+            for t in np.linspace(-a, a, n_per_side, endpoint=False):
+                sensor_locations.append([t, -a])
+            # Right: (a, -a) to (a, a)
+            for t in np.linspace(-a, a, n_per_side, endpoint=False):
+                sensor_locations.append([a, t])
+            # Top: (a, a) to (-a, a)
+            for t in np.linspace(a, -a, n_per_side, endpoint=False):
+                sensor_locations.append([t, a])
+            # Left: (-a, a) to (-a, -a)
+            for t in np.linspace(a, -a, n_per_side, endpoint=False):
+                sensor_locations.append([-a, t])
+            sensor_locations = np.array(sensor_locations[:n_sensors])
+        else:
+            sensor_locations = np.asarray(sensor_locations)
+        
+        # Create polygon mesh
+        if mesh_data is None:
+            mesh_data = create_polygon_mesh(vertices, resolution, sensor_locations=sensor_locations)
+        
+        # Box bounds = the square itself (NonlinearConstraint enforces actual square)
+        bounds = ((-a, a), (-a, a))
+        
+        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
+                   mesh_data=mesh_data, bounds=bounds,
+                   domain_type='square', domain_params={'half_width': a, 'vertices': vertices})
     
     def set_measured_data(self, u_measured: np.ndarray):
         """Set the measured boundary data."""
@@ -1165,37 +1223,65 @@ class FEMNonlinearInverseSolver:
         
         return sources
     
-    def _objective(self, params) -> float:
-        """Objective function: ||u_computed - u_measured||² + soft penalty for boundary violations."""
+    def _objective_misfit(self, params) -> float:
+        """
+        Pure misfit objective: ||u_computed - u_measured||²
+        
+        Used with NonlinearConstraint (DE, trust-constr) where constraint
+        is handled separately.
+        """
+        sources = self._params_to_sources(params)
+        u_computed = self.forward.solve(sources)
+        
+        # Interpolate if needed
+        if len(u_computed) != len(self.u_measured):
+            from scipy.interpolate import interp1d
+            interp = interp1d(self.forward.theta, u_computed, kind='linear', 
+                            fill_value='extrapolate')
+            theta_meas = np.linspace(0, 2*np.pi, len(self.u_measured), endpoint=False)
+            u_computed = interp(theta_meas)
+        
+        misfit = np.sum((u_computed - self.u_measured)**2)
+        self.history.append(misfit)
+        return misfit
+    
+    def _objective_with_barrier(self, params, mu: float = 1e-6) -> float:
+        """
+        Objective with logarithmic barrier for L-BFGS-B interior point method.
+        
+        For disk:    f(x) = misfit - μ * Σ log(1 - xᵢ² - yᵢ²)
+        For ellipse: f(x) = misfit - μ * Σ log(1 - (xᵢ/a)² - (yᵢ/b)²)
+        For square:  f(x) = misfit - μ * Σ [log(a² - xᵢ²) + log(a² - yᵢ²)]
+        """
         sources = self._params_to_sources(params)
         
-        # Soft penalty for sources outside domain (allows gradient-based escape)
-        # Using quadratic penalty instead of hard cutoff
-        penalty = 0.0
-        penalty_weight = 1000.0  # Large but finite
+        # Compute log barrier based on domain type
+        barrier = 0.0
         
         for (x, y), q in sources:
-            if self.domain_type == 'polygon':
-                vertices = self.domain_params.get('vertices', [])
-                if vertices and not self._point_in_polygon(x, y, vertices):
-                    # Estimate distance outside polygon (approximate)
-                    # Use distance from centroid as proxy
-                    cx = np.mean([v[0] for v in vertices])
-                    cy = np.mean([v[1] for v in vertices])
-                    dist = np.sqrt((x - cx)**2 + (y - cy)**2)
-                    penalty += penalty_weight * dist**2
+            if self.domain_type == 'square':
+                # Square with half-width a: |x| < a and |y| < a
+                a = self.domain_params.get('half_width', 1.0)
+                if abs(x) >= a or abs(y) >= a:
+                    return 1e12  # Outside square
+                # Smooth log barrier: -μ * [log(a² - x²) + log(a² - y²)]
+                barrier -= mu * (np.log(a**2 - x**2) + np.log(a**2 - y**2))
+                
             elif self.domain_type == 'ellipse':
+                # Ellipse: (x/a)² + (y/b)² < 1
                 a = self.domain_params.get('a', 1.0)
                 b = self.domain_params.get('b', 1.0)
-                r_normalized = np.sqrt((x/a)**2 + (y/b)**2)
-                if r_normalized >= 0.95:  # Soft boundary at 95% of ellipse
-                    excess = r_normalized - 0.95
-                    penalty += penalty_weight * excess**2
+                r_normalized_sq = (x/a)**2 + (y/b)**2
+                if r_normalized_sq >= 1.0:
+                    return 1e12  # Outside ellipse
+                barrier -= mu * np.log(1.0 - r_normalized_sq)
+                
             else:  # disk
-                r = np.sqrt(x**2 + y**2)
-                if r >= 0.95:  # Soft boundary at r=0.95
-                    excess = r - 0.95
-                    penalty += penalty_weight * excess**2
+                # Disk: x² + y² < 1
+                r_sq = x**2 + y**2
+                if r_sq >= 1.0:
+                    return 1e12  # Outside disk
+                barrier -= mu * np.log(1.0 - r_sq)
         
         u_computed = self.forward.solve(sources)
         
@@ -1210,28 +1296,90 @@ class FEMNonlinearInverseSolver:
         misfit = np.sum((u_computed - self.u_measured)**2)
         self.history.append(misfit)
         
-        return misfit + penalty
+        return misfit + barrier
+    
+    def _domain_constraint(self, params: np.ndarray) -> np.ndarray:
+        """
+        Domain constraint function for NonlinearConstraint.
+        
+        Returns array of constraint values for each source.
+        Constraint satisfied when all values > 0.
+        
+        For disk:    1 - x² - y²
+        For ellipse: 1 - (x/a)² - (y/b)²
+        For square:  min(a - |x|, a - |y|)  [positive when inside]
+        """
+        n = self.n_sources
+        values = np.zeros(n)
+        
+        for i in range(n):
+            x, y = params[2*i], params[2*i + 1]
+            
+            if self.domain_type == 'square':
+                a = self.domain_params.get('half_width', 1.0)
+                values[i] = min(a - abs(x), a - abs(y))
+                
+            elif self.domain_type == 'ellipse':
+                a = self.domain_params.get('a', 1.0)
+                b = self.domain_params.get('b', 1.0)
+                values[i] = 1.0 - (x/a)**2 - (y/b)**2
+                
+            else:  # disk
+                values[i] = 1.0 - x**2 - y**2
+        
+        return values
+    
+    def _get_box_bounds(self, intensity_bounds: tuple = (-5.0, 5.0)):
+        """
+        Get box bounds that contain the domain.
+        
+        These are used for DE/trust-constr; the NonlinearConstraint enforces the actual domain.
+        """
+        n = self.n_sources
+        
+        if self.domain_type == 'square':
+            a = self.domain_params.get('half_width', 1.0)
+            pos_bounds = [(-a, a), (-a, a)]
+        elif self.domain_type == 'ellipse':
+            a = self.domain_params.get('a', 1.0)
+            b = self.domain_params.get('b', 1.0)
+            pos_bounds = [(-a, a), (-b, b)]
+        else:  # disk
+            pos_bounds = [(-1.0, 1.0), (-1.0, 1.0)]
+        
+        bounds = []
+        for _ in range(n):
+            bounds.extend(pos_bounds)
+        for _ in range(n):
+            bounds.append(intensity_bounds)
+        
+        return bounds
     
     def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500, 
               n_restarts: int = 5, init_from: str = 'random',
-              intensity_bounds: tuple = (-5.0, 5.0)) -> InverseResult:
+              intensity_bounds: tuple = (-5.0, 5.0),
+              mu: float = 1e-6) -> InverseResult:
         """
         Solve the nonlinear inverse problem.
         
         Parameters
         ----------
         method : str
-            'L-BFGS-B', 'differential_evolution', 'SLSQP', 'basinhopping'
+            Optimization method:
+            - 'L-BFGS-B': Local quasi-Newton with log barrier
+            - 'differential_evolution': Global with NonlinearConstraint
+            - 'trust-constr': Local with NonlinearConstraint
+            - 'basinhopping': Global with local polish
         maxiter : int
             Maximum iterations
         n_restarts : int
-            Number of random restarts for local optimizers (best result kept)
+            Number of random restarts for local optimizers
         init_from : str
-            'circle' - sources on circle (default)
-            'random' - random positions
+            'circle' - sources on circle, 'random' - random positions
         intensity_bounds : tuple
-            Bounds for source intensities (default: (-5.0, 5.0))
-            Tighter bounds improve convergence for well-separated sources.
+            Bounds for source intensities
+        mu : float
+            Barrier parameter for L-BFGS-B interior point method
         """
         if self.u_measured is None:
             raise ValueError("Call set_measured_data first")
@@ -1239,41 +1387,86 @@ class FEMNonlinearInverseSolver:
         self.history = []
         n = self.n_sources
         
-        # Bounds for new parameter layout: [x0, y0, x1, y1, ..., q0, q1, ...]
-        bounds = []
-        # Position bounds (all positions first)
-        for i in range(n):
-            bounds.extend([self.x_bounds, self.y_bounds])
-        # Intensity bounds (all intensities after positions)
-        for i in range(n):
-            bounds.append(intensity_bounds)
-        
         best_result = None
         best_fun = np.inf
         
-        # For global optimizers, just run once
+        # Box bounds that contain the domain (used by DE/trust-constr)
+        box_bounds = self._get_box_bounds(intensity_bounds)
+        
+        # NonlinearConstraint: domain constraint > 0 for each source
+        from scipy.optimize import NonlinearConstraint
+        domain_constraint = NonlinearConstraint(
+            self._domain_constraint,
+            0.0,      # lower bound (must be > 0, i.e., inside domain)
+            np.inf    # upper bound
+        )
+        
         if method == 'differential_evolution':
+            # DE with NonlinearConstraint - no log barrier needed
             result = differential_evolution(
-                self._objective, bounds, 
-                maxiter=max(1000, maxiter),  # At least 1000 for 3n params
-                seed=42, polish=True, workers=1,
+                self._objective_misfit,
+                box_bounds,
+                constraints=domain_constraint,
+                maxiter=max(2000, maxiter),
+                seed=42,
+                polish=True,
+                workers=1,
                 mutation=(0.5, 1.0),
                 recombination=0.7
             )
             best_result = result
+            
+        elif method == 'trust-constr':
+            # trust-constr with NonlinearConstraint
+            for restart in range(n_restarts):
+                x0 = self._get_initial_guess(init_from, restart)
+                result = minimize(
+                    self._objective_misfit,
+                    x0,
+                    method='trust-constr',
+                    bounds=box_bounds,
+                    constraints=domain_constraint,
+                    options={'maxiter': maxiter}
+                )
+                if result.fun < best_fun:
+                    best_fun = result.fun
+                    best_result = result
+            
         elif method == 'basinhopping':
             from scipy.optimize import basinhopping
             x0 = self._get_initial_guess(init_from, 0)
-            minimizer_kwargs = {'method': 'L-BFGS-B', 'bounds': bounds}
-            result = basinhopping(self._objective, x0, minimizer_kwargs=minimizer_kwargs,
-                                 niter=maxiter, seed=42)
+            
+            # Basinhopping with L-BFGS-B using log barrier
+            # Positions unconstrained (log barrier handles domain)
+            bounds_barrier = [(None, None)] * (2*n) + [intensity_bounds] * n
+            minimizer_kwargs = {
+                'method': 'L-BFGS-B', 
+                'bounds': bounds_barrier,
+                'args': (mu,)
+            }
+            result = basinhopping(
+                self._objective_with_barrier, 
+                x0, 
+                minimizer_kwargs=minimizer_kwargs,
+                niter=maxiter, 
+                seed=42
+            )
             best_result = result
-        else:
-            # Local optimizer with restarts
+            
+        else:  # L-BFGS-B (default) or other gradient-based
+            # L-BFGS-B with log barrier - positions UNCONSTRAINED
+            bounds_barrier = [(None, None)] * (2*n) + [intensity_bounds] * n
+            
             for restart in range(n_restarts):
                 x0 = self._get_initial_guess(init_from, restart)
-                result = minimize(self._objective, x0, method=method, bounds=bounds,
-                                options={'maxiter': maxiter})
+                result = minimize(
+                    self._objective_with_barrier, 
+                    x0, 
+                    method='L-BFGS-B',
+                    bounds=bounds_barrier,
+                    args=(mu,),
+                    options={'maxiter': maxiter}
+                )
                 if result.fun < best_fun:
                     best_fun = result.fun
                     best_result = result
