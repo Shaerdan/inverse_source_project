@@ -259,19 +259,20 @@ class IPOPTDiskProblem:
         
         J[k, 2k] = -2xₖ, J[k, 2k+1] = -2yₖ, all other entries are 0.
         
-        Returns flattened array in row-major order (IPOPT default).
+        Returns ONLY the non-zero values matching jacobianstructure order.
         """
         n = self.n_sources
         
-        # Sparse structure: each constraint depends on 2 variables
-        # Return as dense flattened array
-        jac = np.zeros((n, self.n_vars))
+        # Return only non-zero values in same order as jacobianstructure
+        # Structure is: [(0, 0), (0, 1), (1, 2), (1, 3), ...]
+        # Values are: [-2x₀, -2y₀, -2x₁, -2y₁, ...]
+        jac_values = []
         
         for k in range(n):
-            jac[k, 2*k] = -2 * x[2*k]      # ∂cₖ/∂xₖ
-            jac[k, 2*k + 1] = -2 * x[2*k + 1]  # ∂cₖ/∂yₖ
+            jac_values.append(-2 * x[2*k])      # ∂cₖ/∂xₖ
+            jac_values.append(-2 * x[2*k + 1])  # ∂cₖ/∂yₖ
         
-        return jac.flatten()
+        return np.array(jac_values)
     
     def jacobianstructure(self) -> Tuple[np.ndarray, np.ndarray]:
         """

@@ -226,7 +226,7 @@
       "solvers": {
         "run_linear": false,
         "run_nonlinear": true,
-        "nonlinear_methods": ["L-BFGS-B"],
+        "nonlinear_methods": ["L-BFGS-B","IPOPT"],
         "prefer_fem_for_polygon": true
       },
       "optimizer": {

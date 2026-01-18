@@ -2194,6 +2194,78 @@ def run_conformal_linear(u_measured, sources_true, conformal_map,
     )
 
 
+def run_ipopt_conformal_nonlinear(u_measured, sources_true, conformal_map, n_sources=4,
+                                   seed=42, n_restarts=10, sensor_locations=None,
+                                   max_iter=30000, tol=1e-12) -> ComparisonResult:
+    """
+    Run IPOPT-based conformal nonlinear inverse solver for general domains.
+    
+    Uses IPOPTConformalInverseSolver for proper interior-point optimization
+    with constraint handling (MATLAB fmincon equivalent).
+    """
+    try:
+        from .ipopt_solver import IPOPTConformalInverseSolver, HAS_CYIPOPT
+        from .conformal_solver import ConformalForwardSolver
+    except ImportError:
+        from ipopt_solver import IPOPTConformalInverseSolver, HAS_CYIPOPT
+        from conformal_solver import ConformalForwardSolver
+    
+    if not HAS_CYIPOPT:
+        raise ImportError("cyipopt is required for IPOPT solver. Install via: conda install -c conda-forge cyipopt")
+    
+    t0 = time()
+    
+    # Create IPOPT conformal solver
+    inverse = IPOPTConformalInverseSolver(
+        n_sources=n_sources,
+        conformal_map=conformal_map,
+        n_boundary=len(u_measured),
+        sensor_locations=sensor_locations
+    )
+    
+    # Set measured data
+    inverse.set_measured_data(u_measured)
+    
+    # Solve
+    result = inverse.solve(
+        n_restarts=n_restarts,
+        max_iter=max_iter,
+        tol=tol,
+        verbose=False,
+        print_level=0
+    )
+    
+    elapsed = time() - t0
+    
+    # Extract sources from result
+    sources_rec = [((s.x, s.y), s.intensity) for s in result.sources]
+    
+    # Forward solve for boundary residual
+    forward = ConformalForwardSolver(conformal_map, n_boundary=len(u_measured),
+                                      sensor_locations=sensor_locations)
+    u_rec = forward.solve(sources_rec)
+    u_true = u_measured - np.mean(u_measured)
+    u_rec = u_rec - np.mean(u_rec)
+    
+    metrics = compute_metrics(sources_true, sources_rec, u_true, u_rec)
+    
+    solver_name = f"Conformal Nonlinear (IPOPT)"
+    if n_restarts > 1:
+        solver_name += f" x{n_restarts}"
+    
+    return ComparisonResult(
+        solver_name=solver_name,
+        method_type='nonlinear',
+        forward_type='conformal',
+        position_rmse=metrics['position_rmse'],
+        intensity_rmse=metrics['intensity_rmse'],
+        boundary_residual=metrics['boundary_residual'],
+        time_seconds=elapsed,
+        iterations=result.iterations if hasattr(result, 'iterations') else 0,
+        sources_recovered=sources_rec
+    )
+
+
 def run_conformal_nonlinear(u_measured, sources_true, conformal_map, n_sources=4,
                             optimizer='differential_evolution', seed=42,
                             n_restarts=5, sensor_locations=None) -> ComparisonResult:
@@ -3633,7 +3705,22 @@ def compare_all_solvers_general(domain_type: str = 'disk',
             for opt in optimizers_simple:
                 if opt == 'IPOPT':
                     if verbose:
-                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                        print(f"\nRunning Conformal Nonlinear (IPOPT x{n_restarts})...")
+                    try:
+                        result = run_ipopt_conformal_nonlinear(
+                            u_measured, sources_true, conformal_map,
+                            n_sources=n_sources, seed=seed, n_restarts=n_restarts,
+                            sensor_locations=sensor_locations)
+                        result.solver_name = f"Conformal Ellipse Nonlinear (IPOPT x{n_restarts})"
+                        results.append(result)
+                        if verbose:
+                            print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                    except ImportError as e:
+                        if verbose:
+                            print(f"  Skipped: {e}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Failed: {e}")
                     continue
                 if verbose:
                     print(f"\nRunning Conformal Nonlinear ({opt})...")
@@ -3797,7 +3884,22 @@ def compare_all_solvers_general(domain_type: str = 'disk',
             for opt in optimizers_simple:
                 if opt == 'IPOPT':
                     if verbose:
-                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                        print(f"\nRunning Conformal Nonlinear (IPOPT x{n_restarts})...")
+                    try:
+                        result = run_ipopt_conformal_nonlinear(
+                            u_measured, sources_true, conformal_map,
+                            n_sources=n_sources, seed=seed, n_restarts=n_restarts,
+                            sensor_locations=sensor_locations)
+                        result.solver_name = f"Conformal Star Nonlinear (IPOPT x{n_restarts})"
+                        results.append(result)
+                        if verbose:
+                            print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                    except ImportError as e:
+                        if verbose:
+                            print(f"  Skipped: {e}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Failed: {e}")
                     continue
                 if verbose:
                     print(f"\nRunning Conformal Nonlinear ({opt})...")
@@ -3975,7 +4077,22 @@ def compare_all_solvers_general(domain_type: str = 'disk',
             for opt in optimizers_simple:
                 if opt == 'IPOPT':
                     if verbose:
-                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                        print(f"\nRunning Conformal Nonlinear (IPOPT x{n_restarts})...")
+                    try:
+                        result = run_ipopt_conformal_nonlinear(
+                            u_conformal, sources_true, conformal_map,
+                            n_sources=n_sources, seed=seed, n_restarts=n_restarts,
+                            sensor_locations=sensor_locations)
+                        result.solver_name = f"Conformal {domain_type.title()} Nonlinear (IPOPT x{n_restarts})"
+                        results.append(result)
+                        if verbose:
+                            print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                    except ImportError as e:
+                        if verbose:
+                            print(f"  Skipped: {e}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Failed: {e}")
                     continue
                 if verbose:
                     print(f"\nRunning Conformal Nonlinear ({opt})...")
@@ -4141,7 +4258,22 @@ def compare_all_solvers_general(domain_type: str = 'disk',
             for opt in optimizers_simple:
                 if opt == 'IPOPT':
                     if verbose:
-                        print(f"\n  (Skipping IPOPT for Conformal - use IPOPTConformalInverseSolver directly)")
+                        print(f"\nRunning Conformal Brain Nonlinear (IPOPT x{n_restarts})...")
+                    try:
+                        result = run_ipopt_conformal_nonlinear(
+                            u_conformal, sources_true, conformal_map,
+                            n_sources=n_sources, seed=seed, n_restarts=n_restarts,
+                            sensor_locations=sensor_locations)
+                        result.solver_name = f"Conformal Brain Nonlinear (IPOPT x{n_restarts})"
+                        results.append(result)
+                        if verbose:
+                            print(f"  Position RMSE: {result.position_rmse:.4f}, Time: {result.time_seconds:.2f}s")
+                    except ImportError as e:
+                        if verbose:
+                            print(f"  Skipped: {e}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Failed: {e}")
                     continue
                 if verbose:
                     print(f"\nRunning Conformal Brain Nonlinear ({opt})...")
