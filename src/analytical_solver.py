@@ -234,17 +234,9 @@ class AnalyticalForwardSolver:
         u : array, shape (n_sensors,)
             Solution values at sensor locations (mean-centered)
         """
-        # Check compatibility condition
-        total_q = sum(q for _, q in sources)
-        if abs(total_q) > 1e-10:
-            print(f"Warning: Σqₖ = {total_q:.6e} ≠ 0 (compatibility condition violated)")
-        
         u = np.zeros(self.n_sensors)
         for (xi_x, xi_y), q in sources:
             xi = np.array([xi_x, xi_y])
-            if xi_x**2 + xi_y**2 >= 1.0:
-                print(f"Warning: Source at ({xi_x:.3f}, {xi_y:.3f}) is outside or on boundary")
-                continue
             u += q * greens_function_disk_neumann(self.sensor_locations, xi)
         
         return u - np.mean(u)
