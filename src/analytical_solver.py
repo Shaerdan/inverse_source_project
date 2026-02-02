@@ -47,6 +47,28 @@ try:
 except ImportError:
     from mesh import create_disk_mesh, get_source_grid
 
+# Import optimization utilities for multistart and interior point initialization
+try:
+    from .optimization_utils import (
+        push_to_interior, generate_spread_init, generate_random_init,
+        solve_disk_polar, boundary_potential_disk_cartesian
+    )
+    HAS_OPT_UTILS = True
+except ImportError:
+    try:
+        from optimization_utils import (
+            push_to_interior, generate_spread_init, generate_random_init,
+            solve_disk_polar, boundary_potential_disk_cartesian
+        )
+        HAS_OPT_UTILS = True
+    except ImportError:
+        HAS_OPT_UTILS = False
+        push_to_interior = None
+        generate_spread_init = None
+        generate_random_init = None
+        solve_disk_polar = None
+        boundary_potential_disk_cartesian = None
+
 
 @dataclass
 class Source:
@@ -681,11 +703,27 @@ class AnalyticalNonlinearInverseSolver:
         return values
     
     def _get_initial_guess(self, init_from: str, seed: int) -> List[float]:
-        """Generate initial guess for optimization."""
+        """Generate initial guess for optimization.
+        
+        KEY FIX: Push initial points to interior of bounds.
+        MATLAB's fmincon does this automatically - without it, linspace-style
+        initializations put values at bounds, causing gradient blow-up.
+        """
         n = self.n_sources
         x0 = []
         
-        if init_from == 'random' or seed > 0:
+        if init_from == 'spread':
+            # Evenly spread sources around circle
+            # Vary radius across restarts to cover search space (principled, not tuned)
+            # seed 0->r=0.4, seed 1->r=0.55, seed 2->r=0.7, etc.
+            r = 0.4 + 0.15 * (seed % 3)  # Cycles through 0.4, 0.55, 0.7
+            for i in range(n):
+                angle = 2 * np.pi * i / n + seed * 0.1  # Small offset per restart
+                x0.extend([r * np.cos(angle), r * np.sin(angle)])
+            # Alternating intensities
+            for i in range(n):
+                x0.append(1.0 if i % 2 == 0 else -1.0)
+        elif init_from == 'random' or seed > 0:
             np.random.seed(42 + seed)
             # Positions first
             for i in range(n):
@@ -695,7 +733,7 @@ class AnalyticalNonlinearInverseSolver:
             # Then intensities
             for i in range(n):
                 x0.append(np.random.randn())
-        else:
+        else:  # 'circle' (default)
             # Symmetric initial guess on circle
             for i in range(n):
                 angle = 2 * np.pi * i / n
@@ -704,10 +742,17 @@ class AnalyticalNonlinearInverseSolver:
             for i in range(n):
                 x0.append(1.0 if i % 2 == 0 else -1.0)
         
-        return x0
+        x0 = np.array(x0)
+        
+        # KEY FIX: Push to interior of bounds to avoid gradient blow-up
+        if HAS_OPT_UTILS and push_to_interior is not None:
+            box_bounds = [(-0.95, 0.95)] * (2*n) + [(-5.0, 5.0)] * n
+            x0 = push_to_interior(x0, box_bounds, margin=0.1)
+        
+        return list(x0)
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500,
-              n_restarts: int = 1, init_from: str = 'circle',
+    def solve(self, method: str = 'SLSQP', maxiter: int = 10000,
+              n_restarts: int = 5, init_from: str = 'spread',
               mu: float = 1e-6) -> InverseResult:
         """
         Solve the nonlinear inverse problem.
@@ -716,16 +761,17 @@ class AnalyticalNonlinearInverseSolver:
         ----------
         method : str
             Optimization method:
+            - 'SLSQP': Sequential Least Squares Programming (RECOMMENDED)
             - 'L-BFGS-B': Local quasi-Newton with log barrier
             - 'differential_evolution': Global with NonlinearConstraint
             - 'trust-constr': Local with NonlinearConstraint
             - 'basinhopping': Global with local polish
         maxiter : int
-            Maximum iterations
+            Maximum iterations (default 10000 for SLSQP)
         n_restarts : int
-            Number of random restarts for local optimizers
+            Number of random restarts for local optimizers (default 5)
         init_from : str
-            Initial guess type: 'circle' or 'random'
+            Initial guess type: 'circle', 'spread', or 'random'
         mu : float
             Barrier parameter for L-BFGS-B interior point method
             
@@ -743,9 +789,8 @@ class AnalyticalNonlinearInverseSolver:
         best_result = None
         best_fun = np.inf
         
-        # Box bounds: contain the disk [-1, 1] × [-1, 1], intensity [-5, 5]
-        # These are used for DE/trust-constr; the NonlinearConstraint enforces the disk
-        box_bounds = [(-1.0, 1.0)] * (2*n) + [(-5.0, 5.0)] * n
+        # Box bounds: contain the disk [-0.95, 0.95] × [-0.95, 0.95], intensity [-5, 5]
+        box_bounds = [(-0.95, 0.95)] * (2*n) + [(-5.0, 5.0)] * n
         
         # NonlinearConstraint: 1 - x² - y² > 0 for each source (inside disk)
         from scipy.optimize import NonlinearConstraint
@@ -755,7 +800,51 @@ class AnalyticalNonlinearInverseSolver:
             np.inf    # upper bound (no upper limit)
         )
         
-        if method == 'differential_evolution':
+        # Equality constraint for SLSQP: sum of intensities = 0
+        def intensity_sum(params):
+            return sum(params[2*n + i] for i in range(n))
+        
+        if method == 'SLSQP':
+            # SLSQP with equality constraint AND disk constraint
+            # This matches MATLAB fmincon behavior most closely
+            
+            # Disk constraint: 1 - (x² + y²) >= 0 for each source
+            def disk_ineq_constraint(params):
+                constraints_vals = []
+                for i in range(n):
+                    x_i = params[2*i]
+                    y_i = params[2*i + 1]
+                    # 1 - r² must be >= 0 (source inside disk)
+                    constraints_vals.append(1.0 - x_i**2 - y_i**2)
+                return np.array(constraints_vals)
+            
+            constraints = [
+                {'type': 'eq', 'fun': intensity_sum},  # Sum of intensities = 0
+                {'type': 'ineq', 'fun': disk_ineq_constraint},  # Sources inside disk
+            ]
+            
+            # Use diverse initialization strategies
+            init_strategies = ['spread', 'circle'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
+                
+                try:
+                    result = minimize(
+                        self._objective_misfit,
+                        x0,
+                        method='SLSQP',
+                        bounds=box_bounds,
+                        constraints=constraints,
+                        options={'maxiter': maxiter, 'ftol': 1e-14, 'disp': False}
+                    )
+                    if result.fun < best_fun:
+                        best_fun = result.fun
+                        best_result = result
+                except Exception:
+                    pass
+        
+        elif method == 'differential_evolution':
             # DE with NonlinearConstraint - no log barrier needed
             result = differential_evolution(
                 self._objective_misfit,
@@ -772,8 +861,10 @@ class AnalyticalNonlinearInverseSolver:
             
         elif method == 'trust-constr':
             # trust-constr with NonlinearConstraint
-            for restart in range(n_restarts):
-                x0 = self._get_initial_guess(init_from, restart)
+            init_strategies = ['spread', 'circle'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
                 result = minimize(
                     self._objective_misfit,
                     x0,
@@ -788,10 +879,9 @@ class AnalyticalNonlinearInverseSolver:
             
         elif method == 'basinhopping':
             from scipy.optimize import basinhopping
-            x0 = self._get_initial_guess(init_from, 0)
+            x0 = self._get_initial_guess('spread', 0)
             
             # Basinhopping with L-BFGS-B local optimizer using log barrier
-            # Positions unconstrained (log barrier handles disk)
             bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
             minimizer_kwargs = {
                 'method': 'L-BFGS-B', 
@@ -809,11 +899,12 @@ class AnalyticalNonlinearInverseSolver:
             
         else:  # L-BFGS-B (default) or other gradient-based
             # L-BFGS-B with log barrier - positions UNCONSTRAINED
-            # The log barrier gradient repels from boundary
             bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
             
-            for restart in range(n_restarts):
-                x0 = self._get_initial_guess(init_from, restart)
+            init_strategies = ['spread', 'circle'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
                 result = minimize(
                     self._objective_with_barrier, 
                     x0, 

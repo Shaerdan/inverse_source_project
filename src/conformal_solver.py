@@ -64,6 +64,19 @@ except ImportError:
     )
     from mesh import get_source_grid
 
+# Import optimization utilities for multistart and interior point initialization
+try:
+    from .optimization_utils import push_to_interior, generate_spread_init
+    HAS_OPT_UTILS = True
+except ImportError:
+    try:
+        from optimization_utils import push_to_interior, generate_spread_init
+        HAS_OPT_UTILS = True
+    except ImportError:
+        HAS_OPT_UTILS = False
+        push_to_interior = None
+        generate_spread_init = None
+
 
 # =============================================================================
 # MFS-BASED CONFORMAL MAP (Proper implementation using Laplace equation)
@@ -156,17 +169,18 @@ class MFSConformalMap:
         self.z_colloc = self.z_boundary.copy()
     
     def _solve_conformal_map(self):
-        """Solve for MFS coefficients to represent conformal map."""
+        """Solve for MFS coefficients to represent conformal map (vectorized)."""
         n_colloc = len(self.z_colloc)
         n_charge = len(self.z_charge)
         
-        # Build MFS matrix: A[i,j] = log|z_colloc[i] - z_charge[j]|
-        # This is the fundamental solution for 2D Laplace
-        A = np.zeros((n_colloc, n_charge))
-        for i in range(n_colloc):
-            for j in range(n_charge):
-                dist = np.abs(self.z_colloc[i] - self.z_charge[j])
-                A[i, j] = np.log(dist) / (2 * np.pi)
+        # Build MFS matrix using vectorized computation: A[i,j] = log|z_colloc[i] - z_charge[j]|
+        # Shape: (n_colloc, n_charge)
+        z_colloc_col = self.z_colloc[:, np.newaxis]  # (n_colloc, 1)
+        z_charge_row = self.z_charge[np.newaxis, :]  # (1, n_charge)
+        
+        dist = np.abs(z_colloc_col - z_charge_row)  # (n_colloc, n_charge)
+        dist = np.maximum(dist, 1e-14)  # Avoid log(0)
+        A = np.log(dist) / (2 * np.pi)
         
         # Boundary conditions for u (real part of f): u|_∂Ω = cos(θ)
         b_u = np.cos(self.theta_boundary)
@@ -190,15 +204,22 @@ class MFSConformalMap:
                          "Consider increasing n_charge or adjusting charge_offset.")
     
     def _eval_laplace(self, z: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
-        """Evaluate MFS solution at interior points."""
+        """Evaluate MFS solution at interior points (vectorized for speed)."""
         z = np.atleast_1d(z)
-        result = np.zeros(len(z))
         
-        for i, zi in enumerate(z):
-            for j, zc in enumerate(self.z_charge):
-                dist = np.abs(zi - zc)
-                if dist > 1e-14:
-                    result[i] += coeffs[j] * np.log(dist) / (2 * np.pi)
+        # Vectorized computation: dist[i,j] = |z[i] - z_charge[j]|
+        # Shape: (n_points, n_charge)
+        z_col = z[:, np.newaxis]  # (n_points, 1)
+        z_charge_row = self.z_charge[np.newaxis, :]  # (1, n_charge)
+        
+        dist = np.abs(z_col - z_charge_row)  # (n_points, n_charge)
+        dist = np.maximum(dist, 1e-14)  # Avoid log(0)
+        
+        # MFS kernel: log(dist) / (2*pi)
+        kernel = np.log(dist) / (2 * np.pi)  # (n_points, n_charge)
+        
+        # Sum over charges: result[i] = sum_j coeffs[j] * kernel[i,j]
+        result = kernel @ coeffs  # (n_points,)
         
         return result
     
@@ -406,12 +427,14 @@ class DiskMap(ConformalMap):
 
 class EllipseMap(ConformalMap):
     """
-    Conformal map from ellipse to unit disk via inverse Joukowsky.
+    Conformal map from ellipse to unit disk using MFS (Method of Fundamental Solutions).
+    
+    NOTE: We use MFS instead of the analytical Joukowsky map because:
+    - Joukowsky has singularities at foci (±c where c = sqrt(a²-b²))
+    - These singularities cause objective function discontinuities during optimization
+    - MFS provides a smooth conformal map without singularities in the interior
     
     The ellipse has semi-axes a (along x) and b (along y).
-    
-    The Joukowsky map z = (c/2)(w + 1/w) maps |w| = R to an ellipse.
-    We use its inverse to map the ellipse to the disk.
     
     Parameters
     ----------
@@ -419,88 +442,43 @@ class EllipseMap(ConformalMap):
         Semi-major axis (along x)
     b : float
         Semi-minor axis (along y), must have b ≤ a
+    n_mfs : int
+        Number of MFS collocation points (default 256)
     """
     
-    def __init__(self, a: float = 2.0, b: float = 1.0):
+    def __init__(self, a: float = 2.0, b: float = 1.0, n_mfs: int = 256):
         if b > a:
             a, b = b, a
         self.a = a
         self.b = b
+        self.n_mfs = n_mfs
         
-        # Focal distance c = sqrt(a² - b²)
+        # Focal distance (for reference, not used in MFS)
         self.c = np.sqrt(max(a**2 - b**2, 0))
         
-        # Parameter R such that Joukowsky maps |w|=R to our ellipse
-        # a = (c/2)(R + 1/R), b = (c/2)(R - 1/R) for R > 1
-        # Solving: R = (a + b) / c
-        if self.c > 1e-10:
-            self.R = (a + b) / self.c
-        else:
-            # Nearly circular
-            self.R = 1.0
-            self.c = a  # Use mean radius
+        # Create MFS-based conformal map
+        def ellipse_boundary(t):
+            return a * np.cos(t) + 1j * b * np.sin(t)
+        
+        self._mfs_map = MFSConformalMap(
+            ellipse_boundary, 
+            n_boundary=n_mfs,
+            n_charge=min(200, n_mfs),
+            charge_offset=0.3
+        )
     
     def to_disk(self, z: np.ndarray) -> np.ndarray:
-        """Map from ellipse interior/boundary to unit disk interior/boundary.
-        
-        The inverse Joukowski has two roots w1, w2 with w1*w2 = 1:
-        - For interior points: choose root with |w| < R
-        - For boundary points: choose root with |w| = R (maps to unit circle)
-        """
-        z = np.asarray(z, dtype=complex)
-        scalar = z.ndim == 0
-        z = np.atleast_1d(z)
-        
-        if self.c < 1e-10:  # Nearly circular
-            result = z / self.a
-            return result[0] if scalar else result
-        
-        # Inverse Joukowsky: w² - (2z/c)w + 1 = 0
-        zeta = z / (self.c / 2)  # = 2z/c
-        discriminant = np.sqrt(zeta**2 - 4 + 0j)
-        
-        w1 = (zeta + discriminant) / 2
-        w2 = (zeta - discriminant) / 2
-        
-        # Check if point is on ellipse boundary: (x/a)² + (y/b)² ≈ 1
-        ellipse_param = (np.real(z)/self.a)**2 + (np.imag(z)/self.b)**2
-        on_boundary = np.abs(ellipse_param - 1.0) < 0.01
-        
-        # For interior points: choose smaller root (maps inside disk)
-        # For boundary points: choose root giving |w/R| = 1 (i.e., |w| = R)
-        w = np.where(on_boundary,
-                     np.where(np.abs(np.abs(w1) - self.R) < np.abs(np.abs(w2) - self.R), w1, w2),
-                     np.where(np.abs(w1) < np.abs(w2), w1, w2))
-        
-        result = w / self.R
-        return result[0] if scalar else result
+        """Map from ellipse interior/boundary to unit disk."""
+        return self._mfs_map.to_disk(z)
     
     def from_disk(self, w: np.ndarray) -> np.ndarray:
         """Map from unit disk to ellipse interior."""
-        w = np.asarray(w, dtype=complex)
-        
-        if self.c < 1e-10:
-            return w * self.a
-        
-        # Scale from unit disk
-        w_scaled = w * self.R
-        
-        # Joukowsky: z = (c/2)(w + 1/w)
-        # Avoid division by zero
-        w_safe = np.where(np.abs(w_scaled) < 1e-14, 1e-14, w_scaled)
-        z = (self.c / 2) * (w_safe + 1 / w_safe)
-        
-        return z
+        return self._mfs_map.from_disk(w)
     
     def derivative(self, z: np.ndarray) -> np.ndarray:
-        """Analytical derivative of to_disk."""
+        """Numerical derivative of to_disk."""
         z = np.asarray(z, dtype=complex)
-        
-        if self.c < 1e-10:
-            return np.ones_like(z) / self.a
-        
-        # Numerical fallback for robustness
-        eps = 1e-8
+        eps = 1e-8 * max(self.a, self.b)
         return (self.to_disk(z + eps) - self.to_disk(z - eps)) / (2 * eps)
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
@@ -1026,7 +1004,7 @@ class ConformalForwardSolver:
     
     def solve(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
         """
-        Compute potential at sensor locations from sources.
+        Compute potential at sensor locations from sources (vectorized).
         
         Parameters
         ----------
@@ -1038,9 +1016,10 @@ class ConformalForwardSolver:
         u : array of shape (n_sensors,)
             Potential values at sensor locations
         """
-        # Convert sources to complex
+        # Convert sources to arrays
         z_sources = np.array([s[0][0] + 1j * s[0][1] for s in sources])
         q_sources = np.array([s[1] for s in sources])
+        n_sources = len(sources)
         
         # Check compatibility
         if np.abs(np.sum(q_sources)) > 1e-10:
@@ -1049,17 +1028,23 @@ class ConformalForwardSolver:
         # Map sources to disk
         w_sources = self.map.to_disk(z_sources)
         
-        # Evaluate using disk Green's function
+        # Convert to real coordinates for vectorized Green's function
+        # w_boundary has shape (n_sensors,) complex
+        # w_sources has shape (n_sources,) complex
+        
+        # Vectorized Green's function computation
+        # For each sensor i and source j, compute G(w_boundary[i], w_sources[j])
+        # Then u[i] = sum_j q[j] * G[i,j]
+        
         u = np.zeros(self.n_sensors)
         
-        for i in range(self.n_sensors):
-            w_eval = self.w_boundary[i]
-            x_eval = np.array([[np.real(w_eval), np.imag(w_eval)]])
-            
-            for j, (w_src, q) in enumerate(zip(w_sources, q_sources)):
-                xi_src = np.array([np.real(w_src), np.imag(w_src)])
-                G = greens_function_disk_neumann(x_eval, xi_src)
-                u[i] += q * G
+        # Precompute sensor positions (n_sensors, 2)
+        x_eval = np.column_stack([np.real(self.w_boundary), np.imag(self.w_boundary)])
+        
+        for j in range(n_sources):
+            xi_src = np.array([np.real(w_sources[j]), np.imag(w_sources[j])])
+            G_j = greens_function_disk_neumann(x_eval, xi_src)  # (n_sensors,)
+            u += q_sources[j] * G_j
         
         return u
 
@@ -1453,11 +1438,23 @@ class ConformalNonlinearInverseSolver:
         
         return 1.0 - w_abs_sq
     
-    def _generate_valid_initial_guess(self, bounds: list, seed: int) -> np.ndarray:
+    def _generate_valid_initial_guess(self, bounds: list, seed: int, 
+                                       strategy: str = 'random') -> np.ndarray:
         """
         Generate initial guess with positions guaranteed to be inside the domain.
         
         Uses rejection sampling to ensure all source positions are valid.
+        
+        KEY FIX: Push to interior of bounds after generation to avoid gradient blow-up.
+        
+        Parameters
+        ----------
+        bounds : list of (lower, upper)
+            Bounds for each parameter
+        seed : int
+            Random seed for reproducibility
+        strategy : str
+            'random', 'spread', or 'linspace'
         """
         n = self.n_sources
         np.random.seed(seed)
@@ -1465,32 +1462,64 @@ class ConformalNonlinearInverseSolver:
         x0 = []
         max_attempts = 1000
         
-        for i in range(n):
-            # Generate position inside domain using rejection sampling
-            for attempt in range(max_attempts):
-                x = np.random.uniform(bounds[2*i][0], bounds[2*i][1])
-                y = np.random.uniform(bounds[2*i+1][0], bounds[2*i+1][1])
-                z = complex(x, y)
-                
-                if self.map.is_inside(z):
-                    x0.extend([x, y])
-                    break
-            else:
-                # Fallback: use centroid
-                boundary = self.map.boundary_physical(100)
-                centroid_x = np.real(boundary).mean()
-                centroid_y = np.imag(boundary).mean()
-                # Add small random offset
-                x0.extend([centroid_x + 0.1 * np.random.randn(),
-                          centroid_y + 0.1 * np.random.randn()])
+        if strategy == 'spread':
+            # Spread sources evenly around domain center
+            boundary = self.map.boundary_physical(100)
+            center_x = np.real(boundary).mean()
+            center_y = np.imag(boundary).mean()
+            
+            # Vary radius across restarts to cover search space (principled multi-start)
+            # seed 0->40%, seed 1->55%, seed 2->70% of domain radius
+            distances = np.abs(boundary - complex(center_x, center_y))
+            base_radius = np.min(distances)
+            scale = 0.4 + 0.15 * (seed % 3)  # Cycles through 0.4, 0.55, 0.7
+            safe_radius = scale * base_radius
+            
+            angles = np.linspace(0, 2*np.pi, n, endpoint=False)
+            angles += seed * 0.1  # Small offset per restart
+            
+            for i in range(n):
+                x = center_x + safe_radius * np.cos(angles[i])
+                y = center_y + safe_radius * np.sin(angles[i])
+                x0.extend([x, y])
         
-        # Add intensities (all n, constraint enforced in objective)
-        for i in range(n):
-            x0.append(np.random.randn())
+        else:  # 'random' (default)
+            for i in range(n):
+                # Generate position inside domain using rejection sampling
+                for attempt in range(max_attempts):
+                    x = np.random.uniform(bounds[2*i][0], bounds[2*i][1])
+                    y = np.random.uniform(bounds[2*i+1][0], bounds[2*i+1][1])
+                    z = complex(x, y)
+                    
+                    if self.map.is_inside(z):
+                        x0.extend([x, y])
+                        break
+                else:
+                    # Fallback: use centroid
+                    boundary = self.map.boundary_physical(100)
+                    centroid_x = np.real(boundary).mean()
+                    centroid_y = np.imag(boundary).mean()
+                    # Add small random offset
+                    x0.extend([centroid_x + 0.1 * np.random.randn(),
+                              centroid_y + 0.1 * np.random.randn()])
         
-        return np.array(x0)
+        # Add intensities
+        if strategy == 'spread':
+            for i in range(n):
+                x0.append(0.5 * (1 if i % 2 == 0 else -1))  # Alternating
+        else:
+            for i in range(n):
+                x0.append(np.random.randn())
+        
+        x0 = np.array(x0)
+        
+        # KEY FIX: Push to interior of bounds to avoid gradient blow-up
+        if HAS_OPT_UTILS and push_to_interior is not None:
+            x0 = push_to_interior(x0, bounds, margin=0.1)
+        
+        return x0
     
-    def solve(self, u_meas: np.ndarray, method: str = 'differential_evolution',
+    def solve(self, u_meas: np.ndarray, method: str = 'SLSQP',
               seed: int = 42, n_restarts: int = 5, mu: float = 1e-6) -> Tuple[List[Tuple[Tuple[float, float], float]], float]:
         """
         Solve nonlinear inverse problem.
@@ -1501,6 +1530,7 @@ class ConformalNonlinearInverseSolver:
             Measured boundary potential
         method : str
             Optimization method:
+            - 'SLSQP': Sequential Least Squares Programming (RECOMMENDED)
             - 'differential_evolution': Global with NonlinearConstraint
             - 'trust-constr': Local with NonlinearConstraint
             - 'L-BFGS-B' or 'lbfgsb': Local with log barrier
@@ -1527,8 +1557,12 @@ class ConformalNonlinearInverseSolver:
         x_min, x_max = np.real(boundary).min(), np.real(boundary).max()
         y_min, y_max = np.imag(boundary).min(), np.imag(boundary).max()
         
-        # Box bounds that contain the domain (used by DE/trust-constr)
-        # NonlinearConstraint enforces the actual conformal domain shape
+        # Add small margin to keep sources away from boundary
+        margin = 0.05 * min(x_max - x_min, y_max - y_min)
+        x_min, x_max = x_min + margin, x_max - margin
+        y_min, y_max = y_min + margin, y_max - margin
+        
+        # Box bounds that contain the domain
         box_bounds = []
         for _ in range(n):
             box_bounds.append((x_min, x_max))  # x
@@ -1544,7 +1578,53 @@ class ConformalNonlinearInverseSolver:
             np.inf    # upper bound
         )
         
-        if method == 'differential_evolution':
+        # Equality constraint for SLSQP: sum of intensities = 0
+        def intensity_sum(params):
+            return sum(params[2*n + i] for i in range(n))
+        
+        if method == 'SLSQP':
+            # SLSQP with equality constraint and domain constraint
+            
+            # Inequality constraint: sources must be inside domain
+            # _conformal_constraint returns 1 - |w|² which must be > 0
+            def domain_constraint(params):
+                return self._conformal_constraint(params)  # Must be >= 0
+            
+            constraints = [
+                {'type': 'eq', 'fun': intensity_sum},
+                {'type': 'ineq', 'fun': domain_constraint},  # g(x) >= 0
+            ]
+            
+            best_params = None
+            best_residual = np.inf
+            
+            # Use diverse initialization strategies
+            # 'spread' varies radius with seed, so multiple spread calls cover search space
+            strategies = ['spread'] * min(3, n_restarts) + ['random'] * max(0, n_restarts - 3)
+            
+            for restart, strategy in enumerate(strategies[:n_restarts]):
+                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart, strategy)
+                
+                try:
+                    result = minimize(
+                        lambda p: self._objective_misfit(p, u_meas),
+                        x0,
+                        method='SLSQP',
+                        bounds=box_bounds,
+                        constraints=constraints,
+                        options={'maxiter': 10000, 'ftol': 1e-14, 'disp': False}
+                    )
+                    
+                    if result.fun < best_residual:
+                        best_residual = result.fun
+                        best_params = result.x
+                except Exception:
+                    pass
+            
+            params = best_params
+            residual = best_residual
+        
+        elif method == 'differential_evolution':
             # DE with NonlinearConstraint
             result = differential_evolution(
                 lambda p: self._objective_misfit(p, u_meas),
@@ -1568,8 +1648,10 @@ class ConformalNonlinearInverseSolver:
             best_params = None
             best_residual = np.inf
             
-            for restart in range(n_restarts):
-                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart)
+            strategies = ['spread', 'random'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, strategy in enumerate(strategies[:n_restarts]):
+                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart, strategy)
                 
                 result = scipy_minimize(
                     lambda p: self._objective_misfit(p, u_meas),
@@ -1590,7 +1672,7 @@ class ConformalNonlinearInverseSolver:
         elif method == 'basin_hopping':
             from scipy.optimize import basinhopping
             
-            x0 = self._generate_valid_initial_guess(box_bounds, seed)
+            x0 = self._generate_valid_initial_guess(box_bounds, seed, 'spread')
             
             # Basinhopping with L-BFGS-B using log barrier
             bounds_barrier = [(None, None)] * (2*n) + [(-5.0, 5.0)] * n
@@ -1614,8 +1696,10 @@ class ConformalNonlinearInverseSolver:
             best_params = None
             best_residual = np.inf
             
-            for restart in range(n_restarts):
-                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart)
+            strategies = ['spread', 'random'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, strategy in enumerate(strategies[:n_restarts]):
+                x0 = self._generate_valid_initial_guess(box_bounds, seed + restart, strategy)
                 
                 result = scipy_minimize(
                     lambda p: self._objective_with_barrier(p, u_meas, mu=mu),

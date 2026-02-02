@@ -32,6 +32,19 @@ except ImportError:
                       get_polygon_source_grid, create_ellipse_mesh, get_ellipse_source_grid,
                       get_ellipse_sensor_locations, get_polygon_sensor_locations)
 
+# Import optimization utilities for multistart and interior point initialization
+try:
+    from .optimization_utils import push_to_interior, generate_spread_init
+    HAS_OPT_UTILS = True
+except ImportError:
+    try:
+        from optimization_utils import push_to_interior, generate_spread_init
+        HAS_OPT_UTILS = True
+    except ImportError:
+        HAS_OPT_UTILS = False
+        push_to_interior = None
+        generate_spread_init = None
+
 
 # Check for DOLFINx availability
 try:
@@ -531,6 +544,29 @@ class FEMForwardSolver:
         u = self._project_nullspace(u)
         return self._project_nullspace(u[self.boundary_indices])
     
+    def solve_at_sensors(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
+        """
+        Compute solution at SENSOR locations only.
+        
+        This is the preferred method for inverse problems - sensors are embedded
+        as mesh nodes, so we get exact values without interpolation.
+        
+        Parameters
+        ----------
+        sources : list of ((x, y), q) tuples
+            Point sources
+            
+        Returns
+        -------
+        u_sensors : array, shape (n_sensors,)
+            Solution values at sensor locations
+        """
+        f = self._build_rhs(sources)
+        f = self._project_nullspace(f)
+        u = self._K_lu.solve(f)
+        u = self._project_nullspace(u)
+        return self._project_nullspace(u[self.sensor_indices])
+    
     def _build_rhs(self, sources: List[Tuple[Tuple[float, float], float]]) -> np.ndarray:
         """Build RHS vector using barycentric interpolation with fast cell lookup."""
         n_nodes = len(self.nodes)
@@ -983,6 +1019,8 @@ class FEMNonlinearInverseSolver:
         Number of sources to recover
     resolution : float
         Mesh resolution for FEM forward solver
+    n_sensors : int
+        Number of sensor locations on boundary. Default 100.
     verbose : bool
         Print info. Default False (quiet during optimization)
     mesh_data : tuple, optional
@@ -995,11 +1033,13 @@ class FEMNonlinearInverseSolver:
         Domain parameters (e.g., vertices for polygon, a/b for ellipse)
     """
     
-    def __init__(self, n_sources: int, resolution: float = 0.1, verbose: bool = False,
-                 mesh_data: Tuple = None, bounds: Tuple = None,
+    def __init__(self, n_sources: int, resolution: float = 0.1, n_sensors: int = 100,
+                 verbose: bool = False, mesh_data: Tuple = None, bounds: Tuple = None,
                  domain_type: str = 'disk', domain_params: dict = None):
         self.n_sources = n_sources
-        self.forward = FEMForwardSolver(resolution=resolution, verbose=verbose, mesh_data=mesh_data)
+        self.n_sensors = n_sensors
+        self.forward = FEMForwardSolver(resolution=resolution, n_sensors=n_sensors,
+                                         verbose=verbose, mesh_data=mesh_data)
         self.u_measured = None
         self.history = []
         self.domain_type = domain_type
@@ -1098,8 +1138,8 @@ class FEMNonlinearInverseSolver:
         margin = 0.05 * min(x_max - x_min, y_max - y_min)
         bounds = ((x_min + margin, x_max - margin), (y_min + margin, y_max - margin))
         
-        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
-                   mesh_data=mesh_data, bounds=bounds,
+        return cls(n_sources=n_sources, resolution=resolution, n_sensors=len(sensor_locations),
+                   verbose=verbose, mesh_data=mesh_data, bounds=bounds,
                    domain_type='polygon', domain_params={'vertices': vertices})
     
     @classmethod
@@ -1135,8 +1175,8 @@ class FEMNonlinearInverseSolver:
             mesh_data = create_ellipse_mesh(a, b, resolution, sensor_locations=sensor_locations)
         # Box bounds containing the ellipse (NonlinearConstraint enforces actual ellipse)
         bounds = ((-a, a), (-b, b))
-        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
-                   mesh_data=mesh_data, bounds=bounds,
+        return cls(n_sources=n_sources, resolution=resolution, n_sensors=len(sensor_locations),
+                   verbose=verbose, mesh_data=mesh_data, bounds=bounds,
                    domain_type='ellipse', domain_params={'a': a, 'b': b})
     
     @classmethod
@@ -1192,8 +1232,8 @@ class FEMNonlinearInverseSolver:
         # Box bounds = the square itself (NonlinearConstraint enforces actual square)
         bounds = ((-a, a), (-a, a))
         
-        return cls(n_sources=n_sources, resolution=resolution, verbose=verbose,
-                   mesh_data=mesh_data, bounds=bounds,
+        return cls(n_sources=n_sources, resolution=resolution, n_sensors=len(sensor_locations),
+                   verbose=verbose, mesh_data=mesh_data, bounds=bounds,
                    domain_type='square', domain_params={'half_width': a, 'vertices': vertices})
     
     def set_measured_data(self, u_measured: np.ndarray):
@@ -1227,21 +1267,18 @@ class FEMNonlinearInverseSolver:
         """
         Pure misfit objective: ||u_computed - u_measured||²
         
-        Used with NonlinearConstraint (DE, trust-constr) where constraint
-        is handled separately.
+        Uses solve_at_sensors for exact comparison at sensor locations.
         """
         sources = self._params_to_sources(params)
-        u_computed = self.forward.solve(sources)
         
-        # Interpolate if needed
-        if len(u_computed) != len(self.u_measured):
-            from scipy.interpolate import interp1d
-            interp = interp1d(self.forward.theta, u_computed, kind='linear', 
-                            fill_value='extrapolate')
-            theta_meas = np.linspace(0, 2*np.pi, len(self.u_measured), endpoint=False)
-            u_computed = interp(theta_meas)
+        # Compute at sensor locations (exact, no interpolation needed)
+        u_computed = self.forward.solve_at_sensors(sources)
         
-        misfit = np.sum((u_computed - self.u_measured)**2)
+        # Center both for comparison (removes arbitrary constant)
+        u_computed = u_computed - np.mean(u_computed)
+        u_meas_centered = self.u_measured - np.mean(self.u_measured)
+        
+        misfit = np.sum((u_computed - u_meas_centered)**2)
         self.history.append(misfit)
         return misfit
     
@@ -1283,17 +1320,29 @@ class FEMNonlinearInverseSolver:
                     return 1e12  # Outside disk
                 barrier -= mu * np.log(1.0 - r_sq)
         
-        u_computed = self.forward.solve(sources)
+        u_computed = self.forward.solve_at_boundary(sources)
         
-        # Interpolate if needed
+        # Interpolate if lengths don't match
         if len(u_computed) != len(self.u_measured):
             from scipy.interpolate import interp1d
-            interp = interp1d(self.forward.theta, u_computed, kind='linear', 
-                            fill_value='extrapolate')
+            # Get angles for boundary nodes
+            boundary_nodes = self.forward.nodes[self.forward.boundary_indices]
+            theta_computed = np.arctan2(boundary_nodes[:, 1], boundary_nodes[:, 0])
+            # Sort by angle for interpolation
+            sort_idx = np.argsort(theta_computed)
+            theta_sorted = theta_computed[sort_idx]
+            u_sorted = u_computed[sort_idx]
+            
+            interp = interp1d(theta_sorted, u_sorted, kind='linear', 
+                            fill_value='extrapolate', bounds_error=False)
             theta_meas = np.linspace(0, 2*np.pi, len(self.u_measured), endpoint=False)
             u_computed = interp(theta_meas)
         
-        misfit = np.sum((u_computed - self.u_measured)**2)
+        # Center both for comparison
+        u_computed = u_computed - np.mean(u_computed)
+        u_meas_centered = self.u_measured - np.mean(self.u_measured)
+        
+        misfit = np.sum((u_computed - u_meas_centered)**2)
         self.history.append(misfit)
         
         return misfit + barrier
@@ -1355,8 +1404,8 @@ class FEMNonlinearInverseSolver:
         
         return bounds
     
-    def solve(self, method: str = 'L-BFGS-B', maxiter: int = 500, 
-              n_restarts: int = 5, init_from: str = 'random',
+    def solve(self, method: str = 'SLSQP', maxiter: int = 10000, 
+              n_restarts: int = 5, init_from: str = 'spread',
               intensity_bounds: tuple = (-5.0, 5.0),
               mu: float = 1e-6) -> InverseResult:
         """
@@ -1366,16 +1415,17 @@ class FEMNonlinearInverseSolver:
         ----------
         method : str
             Optimization method:
+            - 'SLSQP': Sequential Least Squares Programming (RECOMMENDED)
             - 'L-BFGS-B': Local quasi-Newton with log barrier
             - 'differential_evolution': Global with NonlinearConstraint
             - 'trust-constr': Local with NonlinearConstraint
             - 'basinhopping': Global with local polish
         maxiter : int
-            Maximum iterations
+            Maximum iterations (default 10000 for SLSQP)
         n_restarts : int
-            Number of random restarts for local optimizers
+            Number of random restarts for local optimizers (default 5)
         init_from : str
-            'circle' - sources on circle, 'random' - random positions
+            'circle', 'spread', or 'random'
         intensity_bounds : tuple
             Bounds for source intensities
         mu : float
@@ -1390,7 +1440,7 @@ class FEMNonlinearInverseSolver:
         best_result = None
         best_fun = np.inf
         
-        # Box bounds that contain the domain (used by DE/trust-constr)
+        # Box bounds that contain the domain
         box_bounds = self._get_box_bounds(intensity_bounds)
         
         # NonlinearConstraint: domain constraint > 0 for each source
@@ -1401,7 +1451,44 @@ class FEMNonlinearInverseSolver:
             np.inf    # upper bound
         )
         
-        if method == 'differential_evolution':
+        # Equality constraint for SLSQP: sum of intensities = 0
+        def intensity_sum(params):
+            return sum(params[2*n + i] for i in range(n))
+        
+        if method == 'SLSQP':
+            # SLSQP with equality constraint AND domain constraint
+            # Domain constraint: _domain_constraint returns values that must be >= 0
+            def domain_ineq_constraint(params):
+                return self._domain_constraint(params)
+            
+            constraints = [
+                {'type': 'eq', 'fun': intensity_sum},
+                {'type': 'ineq', 'fun': domain_ineq_constraint},  # Sources inside domain
+            ]
+            
+            # Use diverse initialization strategies
+            # 'spread' varies radius with seed, so multiple spread calls cover search space
+            init_strategies = ['spread'] * min(3, n_restarts) + ['random'] * max(0, n_restarts - 3)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
+                
+                try:
+                    result = minimize(
+                        self._objective_misfit,
+                        x0,
+                        method='SLSQP',
+                        bounds=box_bounds,
+                        constraints=constraints,
+                        options={'maxiter': maxiter, 'ftol': 1e-14, 'disp': False}
+                    )
+                    if result.fun < best_fun:
+                        best_fun = result.fun
+                        best_result = result
+                except Exception:
+                    pass
+        
+        elif method == 'differential_evolution':
             # DE with NonlinearConstraint - no log barrier needed
             result = differential_evolution(
                 self._objective_misfit,
@@ -1418,8 +1505,10 @@ class FEMNonlinearInverseSolver:
             
         elif method == 'trust-constr':
             # trust-constr with NonlinearConstraint
-            for restart in range(n_restarts):
-                x0 = self._get_initial_guess(init_from, restart)
+            init_strategies = ['spread', 'circle'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
                 result = minimize(
                     self._objective_misfit,
                     x0,
@@ -1434,10 +1523,9 @@ class FEMNonlinearInverseSolver:
             
         elif method == 'basinhopping':
             from scipy.optimize import basinhopping
-            x0 = self._get_initial_guess(init_from, 0)
+            x0 = self._get_initial_guess('spread', 0)
             
             # Basinhopping with L-BFGS-B using log barrier
-            # Positions unconstrained (log barrier handles domain)
             bounds_barrier = [(None, None)] * (2*n) + [intensity_bounds] * n
             minimizer_kwargs = {
                 'method': 'L-BFGS-B', 
@@ -1457,8 +1545,10 @@ class FEMNonlinearInverseSolver:
             # L-BFGS-B with log barrier - positions UNCONSTRAINED
             bounds_barrier = [(None, None)] * (2*n) + [intensity_bounds] * n
             
-            for restart in range(n_restarts):
-                x0 = self._get_initial_guess(init_from, restart)
+            init_strategies = ['spread', 'circle'] + ['random'] * max(0, n_restarts - 2)
+            
+            for restart, init_type in enumerate(init_strategies[:n_restarts]):
+                x0 = self._get_initial_guess(init_type, restart)
                 result = minimize(
                     self._objective_with_barrier, 
                     x0, 
@@ -1494,11 +1584,16 @@ class FEMNonlinearInverseSolver:
         n = self.n_sources
         positions = []  # Will hold [(x0, y0), (x1, y1), ...]
         
+        # Set random seed for reproducibility (critical for deterministic results!)
+        np.random.seed(42 + seed)
+        
         # Use seed parameter to rotate the base pattern (deterministic variation)
         angle_offset = seed * 0.2
         
         if self.domain_type == 'disk':
-            r = 0.6
+            # Vary radius across restarts to cover search space (principled multi-start)
+            # seed 0->r=0.4, seed 1->r=0.55, seed 2->r=0.7
+            r = 0.4 + 0.15 * (seed % 3)
             for i in range(n):
                 theta = 2 * np.pi * i / n + angle_offset
                 if init_from == 'random':
@@ -1513,7 +1608,8 @@ class FEMNonlinearInverseSolver:
         elif self.domain_type == 'ellipse':
             a = self.domain_params.get('a', 1.0)
             b = self.domain_params.get('b', 1.0)
-            scale = 0.7
+            # Vary scale across restarts to cover search space (principled multi-start)
+            scale = 0.4 + 0.15 * (seed % 3)  # Cycles through 0.4, 0.55, 0.7
             for i in range(n):
                 theta = 2 * np.pi * i / n + angle_offset
                 if init_from == 'random':
@@ -1607,9 +1703,16 @@ class FEMNonlinearInverseSolver:
         for (x, y) in positions:
             x0.extend([x, y])
         for i in range(n):
-            x0.append(np.random.uniform(-0.5, 0.5))  # Random initial intensities
+            x0.append(0.5 * (1 if i % 2 == 0 else -1))  # Alternating intensities
         
-        return x0
+        x0 = np.array(x0)
+        
+        # KEY FIX: Push to interior of bounds to avoid gradient blow-up
+        if push_to_interior is not None:
+            box_bounds = self._get_box_bounds((-5.0, 5.0))
+            x0 = push_to_interior(x0, box_bounds, margin=0.1)
+        
+        return list(x0)
 
 
 # =============================================================================
