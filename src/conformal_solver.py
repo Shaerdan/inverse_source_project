@@ -55,14 +55,16 @@ try:
         Source,
         InverseResult
     )
-    from .mesh import get_source_grid
+    from .mesh import (get_source_grid, get_ellipse_source_grid, 
+                       get_polygon_source_grid, get_brain_source_grid)
 except ImportError:
     from analytical_solver import (
         greens_function_disk_neumann,
         Source,
         InverseResult
     )
-    from mesh import get_source_grid
+    from mesh import (get_source_grid, get_ellipse_source_grid,
+                      get_polygon_source_grid, get_brain_source_grid)
 
 # Import optimization utilities for multistart and interior point initialization
 try:
@@ -1126,34 +1128,85 @@ class ConformalLinearInverseSolver:
             print(f"  Using {self.n_sources} provided interior points")
     
     def _generate_source_grid(self):
-        """Generate interior source grid by mapping from disk."""
-        # Determine grid density from resolution
-        n_radial = max(5, int(0.85 / self.source_resolution))
-        n_angular = max(8, int(2 * np.pi / self.source_resolution))
+        """
+        Generate interior source grid using gmsh mesh.
         
-        # Generate polar grid in disk
-        r = np.linspace(0.12, 0.88, n_radial)
-        theta = np.linspace(0, 2*np.pi, n_angular, endpoint=False)
-        R, Theta = np.meshgrid(r, theta)
-        w_grid = R.flatten() * np.exp(1j * Theta.flatten())
+        Detects domain type from conformal map and uses appropriate
+        gmsh-based grid generator for consistent methodology with FEM.
+        """
+        # Detect domain type and generate appropriate gmsh grid
+        if isinstance(self.map, EllipseMap):
+            # Ellipse domain - use ellipse grid
+            grid_points = get_ellipse_source_grid(
+                self.map.a, self.map.b,
+                resolution=self.source_resolution,
+                margin=0.0  # Include all interior points
+            )
+            if self.verbose:
+                print(f"  Using gmsh ellipse grid: a={self.map.a}, b={self.map.b}")
+                
+        elif hasattr(self.map, 'boundary_func'):
+            # MFSConformalMap or similar with boundary function
+            # Sample boundary to get vertices for polygon grid
+            n_vertices = 100
+            t = np.linspace(0, 2*np.pi, n_vertices, endpoint=False)
+            boundary = np.array([self.map.boundary_func(ti) for ti in t])
+            vertices = [(np.real(z), np.imag(z)) for z in boundary]
+            
+            grid_points = get_polygon_source_grid(
+                vertices,
+                resolution=self.source_resolution,
+                margin=0.0
+            )
+            if self.verbose:
+                print(f"  Using gmsh polygon grid from boundary function")
+                
+        elif hasattr(self.map, 'vertices'):
+            # Polygon map with explicit vertices
+            vertices = self.map.vertices
+            grid_points = get_polygon_source_grid(
+                vertices,
+                resolution=self.source_resolution,
+                margin=0.0
+            )
+            if self.verbose:
+                print(f"  Using gmsh polygon grid: {len(vertices)} vertices")
+                
+        else:
+            # Fallback: try to sample boundary from boundary_physical method
+            if hasattr(self.map, 'boundary_physical'):
+                boundary = self.map.boundary_physical(100)
+                vertices = [(np.real(z), np.imag(z)) for z in boundary]
+                grid_points = get_polygon_source_grid(
+                    vertices,
+                    resolution=self.source_resolution,
+                    margin=0.0
+                )
+                if self.verbose:
+                    print(f"  Using gmsh polygon grid from boundary_physical")
+            else:
+                raise ValueError(
+                    "Cannot auto-detect domain type for source grid generation. "
+                    "Please provide interior_points explicitly."
+                )
         
-        # Map to physical domain
-        z_grid = self.map.from_disk(w_grid)
+        # Convert to complex and map to disk
+        z_grid = grid_points[:, 0] + 1j * grid_points[:, 1]
         
-        # Keep only interior points
+        # Filter to interior only
         inside = self.map.is_inside(z_grid)
         z_grid = z_grid[inside]
-        w_grid = w_grid[inside]
+        
+        # Map to unit disk for Green's function evaluation
+        w_grid = self.map.to_disk(z_grid)
         
         self.z_grid = z_grid
         self.w_grid = w_grid
         self.n_sources = len(z_grid)
-        
-        # Store as (N, 2) array for compatibility
         self.grid_points = np.column_stack([np.real(z_grid), np.imag(z_grid)])
         
         if self.verbose:
-            print(f"  Generated {self.n_sources} interior grid points")
+            print(f"  Generated {self.n_sources} interior grid points (gmsh)")
     
     @property
     def interior_points(self) -> np.ndarray:

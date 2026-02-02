@@ -351,9 +351,9 @@ class AnalyticalLinearInverseSolver:
         self.boundary_points = self.sensor_locations
         self.theta_boundary = np.arctan2(self.sensor_locations[:, 1], self.sensor_locations[:, 0])
         
-        # Use shared mesh for source candidates
+        # Use shared mesh for source candidates (all interior points, no filtering)
         self.interior_points = get_source_grid(
-            resolution=source_resolution, radius=0.9
+            resolution=source_resolution, radius=1.0
         )
         self.n_interior = len(self.interior_points)
         self.G = None
