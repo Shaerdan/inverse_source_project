@@ -1,41 +1,44 @@
-# Inverse Source Localization Project
-# ==============================================
-# NOTE: FEniCSx is best installed via conda (see environment.yml)
-# If using pip-only, you may need system-level dependencies:
-#   Ubuntu/Debian: sudo apt install libopenmpi-dev openmpi-bin petsc-dev
-#   macOS: brew install open-mpi petsc
+# Inverse Source Localization - Pip Requirements
+# ================================================
 #
-# For pip installation of FEniCSx (may require additional setup):
-# pip install fenics-dolfinx
+# For minimal installation (conformal/analytical solvers only):
+#     pip install -r requirements.txt
+#
+# For full installation:
+#     pip install -r requirements.txt
+#     pip install -r requirements-full.txt
+#
+# NOTE: Some dependencies are better installed via conda:
+#     - cyipopt: conda install -c conda-forge cyipopt
+#     - FEniCSx: conda install -c conda-forge fenics-dolfinx
+#
+# ================================================
 
-# Core Scientific Stack
+# Core Scientific Stack (REQUIRED)
 numpy>=1.24
 scipy>=1.11
-mpi4py>=3.1
+matplotlib>=3.7
 
-# Mesh handling
+# Convex optimization for L1/TV regularization
+cvxpy>=1.4
+ecos>=2.0
+
+# Clustering for source detection
+scikit-learn>=1.3
+
+# Mesh handling (for FEM/BEM)
 gmsh>=4.12
 meshio>=5.3
 h5py>=3.9
 
-# Visualization
-matplotlib>=3.7
-pyvista>=0.42
-
-# Jupyter support
-jupyterlab>=4.0
-ipykernel
-ipywidgets
-
 # Utilities
 tqdm
+pyyaml
 
-# Development
-pytest
-black
-pylint
+# Visualization (optional but recommended)
+pyvista>=0.42
 
-# For inverse problem solving (optimization)
-scikit-learn>=1.3  # For DBSCAN clustering of intensity field
-cvxpy>=1.4  # Convex optimization (for TV regularization)
-ecos>=2.0  # Solver for cvxpy
+# Development (optional)
+# pytest>=7.0
+# black
+# flake8

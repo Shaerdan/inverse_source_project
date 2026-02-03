@@ -2,54 +2,82 @@
 Inverse Source Localization Package
 ====================================
 
-A comprehensive toolkit for inverse source localization in 2D domains.
+A toolkit for inverse source localization of acoustic point sources in 2D domains.
 
 Solver Types
 ------------
-1. **Analytical Solver** (Unit Disk Only)
-   - Uses exact closed-form Neumann Green's function
+1. **Analytical Solver** (Unit Disk)
+   - Exact closed-form Neumann Green's function
    - Fastest for point sources on unit disk
-   - No discretization error in forward problem
-   
-2. **BEM Solver** (Boundary Element Method)
-   - Numerical integration for boundary integrals
-   - Handles distributed sources
-   - Validates analytical solver
+
+2. **Conformal Solver** (General Domains) 
+   - Maps general domains to unit disk via MFS conformal mapping
+   - Supports: disk, ellipse, star, polygon, brain, custom domains
+   - Recommended for most use cases
 
 3. **FEM Solver** (Finite Element Method)
-   - Mesh-based discretization
+   - Mesh-based discretization via FEniCSx
    - Works for any domain geometry
-   - Handles general source distributions
+   - Requires FEniCSx installation
 
-4. **Conformal Solver** (General Domains)
-   - Maps general domains to unit disk
-   - Uses analytical solution after mapping
-   - Supports ellipse, star-shaped domains
+4. **IPOPT Solver** (Nonlinear Optimization)
+   - Professional nonlinear optimizer matching MATLAB fmincon
+   - Requires cyipopt installation
 
 Problem Formulations
 --------------------
-1. **Linear (Distributional)**: Sources on fixed grid, solve for intensities
-2. **Nonlinear (Continuous)**: Optimize source positions and intensities
+1. **Nonlinear (Continuous)**: Optimize source positions and intensities
+   - Use for: source localization with unknown positions
+   - Recommended approach
+
+2. **Linear (Grid-based)**: Sources on fixed grid, solve for intensities
+   - Use for: intensity field estimation
+   - Note: fundamentally ill-posed for sparse recovery
 
 Quick Start
 -----------
->>> from inverse_source import AnalyticalForwardSolver, AnalyticalLinearInverseSolver
->>> import numpy as np
+>>> from inverse_source import ConformalForwardSolver, ConformalNonlinearInverseSolver
+>>> from inverse_source import create_conformal_map
 >>> 
->>> # Define sources (must sum to zero for Neumann BC)
+>>> # Create conformal map for ellipse domain
+>>> cmap = create_conformal_map('ellipse', a=1.5, b=0.8)
+>>> 
+>>> # Define true sources (intensities must sum to zero)
 >>> sources = [
-...     ((-0.3, 0.4), 1.0),
-...     ((0.5, -0.3), -1.0),
+...     ((0.3, 0.2), 1.0),
+...     ((-0.2, -0.3), -1.0),
 ... ]
 >>> 
 >>> # Forward solve
->>> forward = AnalyticalForwardSolver(n_boundary_points=100)
->>> u_boundary = forward.solve(sources)
+>>> forward = ConformalForwardSolver(cmap, n_sensors=100)
+>>> u_measured = forward.solve(sources)
 >>> 
->>> # Linear inverse with L1 regularization
->>> inverse = AnalyticalLinearInverseSolver(n_boundary=100)
->>> inverse.build_greens_matrix()
->>> q_recovered = inverse.solve_l1(u_boundary, alpha=1e-4)
+>>> # Inverse solve
+>>> inverse = ConformalNonlinearInverseSolver(cmap, n_sources=2, n_sensors=100)
+>>> result = inverse.solve(u_measured)
+
+For Disk Domain (Faster)
+------------------------
+>>> from inverse_source import AnalyticalForwardSolver, AnalyticalNonlinearInverseSolver
+>>> 
+>>> forward = AnalyticalForwardSolver(n_boundary_points=100)
+>>> u_measured = forward.solve(sources)
+>>> 
+>>> inverse = AnalyticalNonlinearInverseSolver(n_sources=2, n_sensors=100)
+>>> result = inverse.solve(u_measured)
+
+Theoretical Bound
+-----------------
+The maximum number of recoverable sources is bounded by:
+
+    N_max = (2/3) * log(σ_Four) / log(ρ_min)
+
+where:
+- σ_Four = σ_noise / √M is the Fourier-domain noise level
+- ρ_min is the minimum conformal radius of the sources
+- M is the number of sensors
+
+See THEORY_FRAMEWORK.md for details.
 
 Authors
 -------
@@ -60,19 +88,41 @@ License
 MIT License
 """
 
-__version__ = "7.30.0"  # Fixed source generation: r in [0.5, 0.85] for better conditioning, well-separated test sources
+__version__ = "0.8.0"
 __author__ = "Serdan"
 
 # =============================================================================
-# ANALYTICAL SOLVER (Exact solution for unit disk - formerly mislabeled as "BEM")
+# CONFORMAL SOLVER (General Domains - Recommended)
+# =============================================================================
+from .conformal_solver import (
+    # Conformal maps
+    MFSConformalMap,
+    ConformalMap,
+    DiskMap,
+    EllipseMap,
+    RectangleMap,
+    PolygonMap,
+    NumericalConformalMap,
+    create_conformal_map,
+    # Forward solver
+    ConformalForwardSolver,
+    # Inverse solvers
+    ConformalNonlinearInverseSolver,
+    ConformalLinearInverseSolver,
+    # Utilities
+    solve_forward_conformal,
+)
+
+# =============================================================================
+# ANALYTICAL SOLVER (Unit Disk - Fastest)
 # =============================================================================
 from .analytical_solver import (
     # Forward
     AnalyticalForwardSolver,
-    # Inverse - Linear (grid-based)
-    AnalyticalLinearInverseSolver,
-    # Inverse - Nonlinear (continuous positions)
+    # Inverse - Nonlinear (recommended)
     AnalyticalNonlinearInverseSolver,
+    # Inverse - Linear (grid-based, for comparison)
+    AnalyticalLinearInverseSolver,
     # Green's function
     greens_function_disk_neumann,
     greens_function_disk_neumann_gradient,
@@ -80,186 +130,121 @@ from .analytical_solver import (
     generate_synthetic_data,
     Source,
     InverseResult,
-    # Backward-compatible aliases (deprecated)
-    BEMForwardSolver,  # -> AnalyticalForwardSolver
-    BEMLinearInverseSolver,  # -> AnalyticalLinearInverseSolver
-    BEMNonlinearInverseSolver,  # -> AnalyticalNonlinearInverseSolver
 )
 
 # =============================================================================
-# TRUE BEM SOLVER (Numerical boundary integration)
+# FEM SOLVER (Requires FEniCSx)
 # =============================================================================
-from .bem_solver import (
-    BEMForwardSolver as BEMNumericalForwardSolver,
-    BEMLinearInverseSolver as BEMNumericalLinearInverseSolver,
-    BEMNonlinearInverseSolver as BEMNumericalNonlinearInverseSolver,
-    BEMDiscretization,
-    BEMResult,
-    fundamental_solution_2d,
-    fundamental_solution_gradient_2d,
-    validate_against_analytical,
-    compare_bem_analytical,
+try:
+    from .fem_solver import (
+        FEMForwardSolver,
+        FEMLinearInverseSolver,
+        FEMNonlinearInverseSolver,
+    )
+    _FEM_AVAILABLE = True
+except ImportError:
+    _FEM_AVAILABLE = False
+
+# =============================================================================
+# IPOPT SOLVER (Requires cyipopt)
+# =============================================================================
+try:
+    from .ipopt_solver import (
+        IPOPTNonlinearInverseSolver,
+        check_cyipopt_available,
+        get_ipopt_version,
+    )
+    _IPOPT_AVAILABLE = True
+except ImportError:
+    _IPOPT_AVAILABLE = False
+
+# =============================================================================
+# DOMAINS
+# =============================================================================
+from .domains import (
+    get_domain,
+    DiskDomain,
+    EllipseDomain,
+    RectangleDomain,
+    PolygonDomain,
+    BrainDomain,
 )
 
 # =============================================================================
-# MESH GENERATION (shared by FEM and linear solvers)
+# MESH (Requires gmsh)
 # =============================================================================
-from .mesh import (
-    create_disk_mesh,
-    get_source_grid,
-    create_ellipse_mesh,
-    get_ellipse_source_grid,
-    create_polygon_mesh,
-    get_polygon_source_grid,
-)
-
-# =============================================================================
-# FEM SOLVER (Finite Element Method)
-# =============================================================================
-from .fem_solver import (
-    # Forward
-    FEMForwardSolver,
-    # Inverse - Linear (grid-based)
-    FEMLinearInverseSolver,
-    # Inverse - Nonlinear (continuous positions)
-    FEMNonlinearInverseSolver,
-    # Low-level solve
-    solve_poisson,
-    generate_synthetic_data_fem,
-)
-
-# =============================================================================
-# CONFORMAL MAPPING SOLVER (General domains)
-# =============================================================================
-from .conformal_solver import (
-    # Base class
-    ConformalMap,
-    # Specific maps
-    DiskMap,
-    EllipseMap,
-    RectangleMap,
-    PolygonMap,
-    NumericalConformalMap,
-    # Solvers
-    ConformalForwardSolver,
-    ConformalLinearInverseSolver,
-    ConformalNonlinearInverseSolver,
-    # Factory functions
-    create_conformal_map,
-    solve_forward_conformal,
-)
-
-# =============================================================================
-# REGULARIZATION METHODS
-# =============================================================================
-from .regularization import (
-    solve_l1,
-    solve_l2,
-    solve_tv_chambolle_pock,
-    solve_tv_admm,
-    solve_regularized,
-    build_gradient_operator,
-    RegularizationResult,
-)
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-from .config import (
-    Config,
-    ForwardConfig,
-    InverseConfig,
-    GridConfig,
-    TVConfig,
-    VisualizationConfig,
-    get_config,
-    get_template,
-    TEMPLATES,
-)
+try:
+    from .mesh import (
+        create_disk_mesh,
+        create_ellipse_mesh,
+        create_rectangle_mesh,
+        create_polygon_mesh,
+        create_brain_mesh,
+        get_brain_boundary,
+    )
+    _MESH_AVAILABLE = True
+except ImportError:
+    _MESH_AVAILABLE = False
 
 # =============================================================================
 # UTILITIES
 # =============================================================================
 from .utils import (
-    plot_sources,
-    plot_boundary_data,
-    plot_recovery_comparison,
-    compute_source_error,
-    l_curve_analysis,
-    plot_l_curve,
-    create_test_sources,
+    compute_rmse,
+    match_sources,
+)
+
+from .regularization import (
+    solve_tikhonov,
+    solve_l1,
+    solve_tv,
 )
 
 # =============================================================================
-# PARAMETER STUDY
-# =============================================================================
-from .parameter_study import (
-    parameter_sweep,
-    find_l_curve_corner,
-    compare_methods,
-    plot_l_curve_comparison,
-    plot_method_comparison,
-    noise_study,
-    plot_noise_study,
-    SweepResult,
-)
-
-# =============================================================================
-# PARAMETER SELECTION (L-curve, discrepancy principle)
-# =============================================================================
-from .parameter_selection import (
-    estimate_alpha,
-    find_lcurve_corner,
-    find_discrepancy_alpha,
-    parameter_sweep as param_sweep_lcurve,  # Renamed to avoid conflict
-    run_full_comparison,
-    plot_parameter_sweep,
-    plot_solutions_comparison,
-    ParameterSweepResult,
-    # New proper metrics (not threshold-dependent)
-    localization_score,
-    sparsity_ratio,
-    intensity_weighted_centroid,
-)
-
-# =============================================================================
-# COMPARISON (all solver types)
+# COMPARISON & CALIBRATION
 # =============================================================================
 from .comparison import (
-    compare_all_solvers,
-    compare_all_solvers_general,
-    run_domain_comparison,
     create_domain_sources,
-    print_comparison_table,
-    plot_comparison,
-    ComparisonResult,
-    # Individual solver runners
-    run_bem_linear,
-    run_bem_nonlinear,
-    run_fem_linear,
-    run_fem_nonlinear,
-    run_conformal_linear,
-    run_conformal_nonlinear,
-    run_fem_polygon_linear,
-    run_fem_polygon_nonlinear,
-    run_fem_ellipse_linear,
-    run_fem_ellipse_nonlinear,
+    get_sensor_locations,
+    run_comparison,
+)
+
+from .calibration import (
+    create_well_separated_sources,
+    create_clustered_sources,
 )
 
 # =============================================================================
-# MODULE IMPORTS (for inverse_source.module style access)
+# CONVENIENCE FUNCTIONS
 # =============================================================================
-from . import mesh
-from . import analytical_solver
-from . import bem_solver
-from . import conformal_solver
-from . import fem_solver
-from . import regularization
-from . import parameter_study
-from . import parameter_selection
-from . import config
-from . import utils
-from . import comparison
+
+def check_dependencies():
+    """Check which optional dependencies are available."""
+    deps = {
+        'numpy': True,
+        'scipy': True,
+        'matplotlib': True,
+        'FEniCSx (fem_solver)': _FEM_AVAILABLE,
+        'cyipopt (ipopt_solver)': _IPOPT_AVAILABLE,
+        'gmsh (mesh)': _MESH_AVAILABLE,
+    }
+    
+    print("Inverse Source Package - Dependency Check")
+    print("=" * 45)
+    for dep, available in deps.items():
+        status = "✓" if available else "✗"
+        print(f"  {status} {dep}")
+    print()
+    
+    if not _FEM_AVAILABLE:
+        print("Note: FEM solver requires FEniCSx.")
+        print("      Install via: conda install -c conda-forge fenics-dolfinx")
+    if not _IPOPT_AVAILABLE:
+        print("Note: IPOPT solver requires cyipopt.")
+        print("      Install via: conda install -c conda-forge cyipopt")
+    
+    return deps
+
 
 # =============================================================================
 # PUBLIC API
@@ -269,172 +254,52 @@ __all__ = [
     '__version__',
     '__author__',
     
-    # === ANALYTICAL SOLVER (recommended for unit disk) ===
+    # Conformal solver (recommended)
+    'MFSConformalMap',
+    'ConformalMap', 
+    'DiskMap',
+    'EllipseMap',
+    'RectangleMap',
+    'PolygonMap',
+    'NumericalConformalMap',
+    'create_conformal_map',
+    'ConformalForwardSolver',
+    'ConformalNonlinearInverseSolver',
+    'ConformalLinearInverseSolver',
+    'solve_forward_conformal',
+    
+    # Analytical solver (disk only)
     'AnalyticalForwardSolver',
-    'AnalyticalLinearInverseSolver', 
     'AnalyticalNonlinearInverseSolver',
+    'AnalyticalLinearInverseSolver',
     'greens_function_disk_neumann',
     'greens_function_disk_neumann_gradient',
     'generate_synthetic_data',
-    
-    # === TRUE BEM SOLVER ===
-    'BEMNumericalForwardSolver',
-    'BEMNumericalLinearInverseSolver',
-    'BEMDiscretization',
-    'BEMResult',
-    'fundamental_solution_2d',
-    'validate_against_analytical',
-    'compare_bem_analytical',
-    
-    # === MESH ===
-    'create_disk_mesh',
-    'get_source_grid',
-    'create_ellipse_mesh',
-    'get_ellipse_source_grid',
-    'create_polygon_mesh',
-    'get_polygon_source_grid',
-    
-    # === FEM SOLVER ===
-    'FEMForwardSolver',
-    'FEMLinearInverseSolver',
-    'FEMNonlinearInverseSolver',
-    'solve_poisson',
-    'generate_synthetic_data_fem',
-    
-    # === CONFORMAL SOLVER ===
-    'ConformalMap',
-    'DiskMap',
-    'EllipseMap', 
-    'StarShapedMap',
-    'ConformalForwardSolver',
-    'ConformalLinearInverseSolver',
-    'ConformalNonlinearInverseSolver',
-    'create_ellipse_solver',
-    'create_star_solver',
-    
-    # === DATA CLASSES ===
     'Source',
     'InverseResult',
     
-    # === REGULARIZATION ===
+    # Domains
+    'get_domain',
+    'DiskDomain',
+    'EllipseDomain',
+    'RectangleDomain',
+    'PolygonDomain',
+    'BrainDomain',
+    
+    # Utilities
+    'compute_rmse',
+    'match_sources',
+    'solve_tikhonov',
     'solve_l1',
-    'solve_l2',
-    'solve_tv_chambolle_pock',
-    'solve_tv_admm',
-    'solve_regularized',
-    'build_gradient_operator',
-    'RegularizationResult',
+    'solve_tv',
     
-    # === CONFIG ===
-    'Config',
-    'get_config',
-    'get_template',
-    'TEMPLATES',
-    
-    # === UTILS ===
-    'plot_sources',
-    'plot_boundary_data',
-    'plot_recovery_comparison',
-    'compute_source_error',
-    'l_curve_analysis',
-    'plot_l_curve',
-    'create_test_sources',
-    
-    # === PARAMETER STUDY ===
-    'parameter_sweep',
-    'find_l_curve_corner',
-    'compare_methods',
-    'SweepResult',
-    
-    # === COMPARISON ===
-    'compare_all_solvers',
-    'compare_all_solvers_general',
-    'run_domain_comparison',
+    # Comparison
     'create_domain_sources',
-    'print_comparison_table',
-    'plot_comparison',
-    'ComparisonResult',
-    'run_bem_linear',
-    'run_bem_nonlinear',
-    'run_fem_linear',
-    'run_fem_nonlinear',
-    'run_conformal_linear',
-    'run_conformal_nonlinear',
-    'run_fem_polygon_linear',
-    'run_fem_polygon_nonlinear',
-    'run_fem_ellipse_linear',
-    'run_fem_ellipse_nonlinear',
+    'get_sensor_locations',
+    'run_comparison',
+    'create_well_separated_sources',
+    'create_clustered_sources',
     
-    # === MODULES ===
-    'mesh',
-    'analytical_solver',
-    'bem_solver',
-    'conformal_solver',
-    'fem_solver',
-    'regularization',
-    'parameter_study',
-    'config',
-    'utils',
-    'comparison',
-    
-    # === BACKWARD-COMPATIBLE ALIASES (deprecated) ===
-    'BEMForwardSolver',  # Use AnalyticalForwardSolver
-    'BEMLinearInverseSolver',  # Use AnalyticalLinearInverseSolver
-    'BEMNonlinearInverseSolver',  # Use AnalyticalNonlinearInverseSolver
-    'ConformalBEMSolver',  # Use ConformalForwardSolver
-    'ConformalNonlinearInverse',  # Use ConformalNonlinearInverseSolver
-    'ConformalLinearInverse',  # Use ConformalLinearInverseSolver
+    # Check
+    'check_dependencies',
 ]
-
-# Mesh convergence study
-from .mesh_convergence import (
-    run_forward_mesh_convergence,
-    run_inverse_source_grid_convergence,
-    run_full_convergence_study,
-    ConvergenceStudy,
-    ConvergenceResult
-)
-
-
-# Calibration module
-from .calibration import (
-    calibrate_domain,
-    calibrate_all_domains,
-    load_calibration_config,
-    save_calibration_config,
-    get_domain_params,
-    plot_calibration_results,
-    DomainCalibration,
-    CalibrationConfig
-)
-
-# Reference solution generation
-from .reference_solution import (
-    get_reference_solution,
-    generate_measurement_data,
-    verify_fem_convergence
-)
-
-# Experiment tracking
-from .experiment_tracker import (
-    ExperimentTracker,
-    CalibrationTracker,
-    ExperimentDatabase,
-    ExperimentConfig,
-    ExperimentMetrics,
-    get_timestamp,
-    get_short_hash,
-    list_experiments,
-    get_experiment_details
-)
-
-# Mesh saving functions
-from .mesh import (
-    save_mesh_npz,
-    load_mesh_npz,
-    save_mesh_msh,
-    save_source_grid_npz,
-    load_source_grid_npz,
-    save_source_grid_msh,
-    save_meshes
-)
