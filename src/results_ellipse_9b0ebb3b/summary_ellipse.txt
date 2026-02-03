@@ -1,0 +1,22 @@
+============================================================
+ELLIPSE DOMAIN RESULTS
+============================================================
+
+Method                    Metric               Time (s)  
+------------------------------------------------------------
+Conformal_L2              α = 2.34e-04         0.00      
+Conformal_L1              α = 1.27e-04         0.00      
+Conformal_TV              α = 2.98e-02         0.00      
+Conformal_Nonlinear       RMSE = 4.8248e-03    544.36    
+FEM_L2                    α = 1.44e-03         0.00      
+FEM_L1                    α = 4.28e-04         0.00      
+FEM_TV                    α = 2.34e-04         0.00      
+FEM_Nonlinear             RMSE = 1.3616e-02    388.24    
+
+L-curve optimal alphas:
+  conformal_l2: α = 2.34e-04
+  conformal_l1: α = 1.27e-04
+  conformal_tv: α = 2.98e-02
+  fem_l2: α = 1.44e-03
+  fem_l1: α = 4.28e-04
+  fem_tv: α = 2.34e-04

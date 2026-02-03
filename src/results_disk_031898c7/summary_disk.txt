@@ -1,0 +1,22 @@
+============================================================
+DISK DOMAIN RESULTS
+============================================================
+
+Method                    Metric               Time (s)  
+------------------------------------------------------------
+Analytical_L2             α = 2.34e-04         0.00      
+Analytical_L1             α = 6.95e-05         0.00      
+Analytical_TV             α = 2.98e-02         0.00      
+Analytical_Nonlinear      RMSE = 4.7573e-03    210.95    
+FEM_L2                    α = 1.27e-04         0.00      
+FEM_L1                    α = 2.98e-02         0.00      
+FEM_TV                    α = 5.46e-02         0.00      
+FEM_Nonlinear             RMSE = 6.0981e-03    421.84    
+
+L-curve optimal alphas:
+  analytical_l2: α = 2.34e-04
+  analytical_l1: α = 6.95e-05
+  analytical_tv: α = 2.98e-02
+  fem_l2: α = 1.27e-04
+  fem_l1: α = 2.98e-02
+  fem_tv: α = 5.46e-02

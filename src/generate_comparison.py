@@ -544,7 +544,7 @@ def run_brain_comparison(output_dir, n_sources=4, noise_level=0.01, seed=42,
             idx = int(t / (2*np.pi) * len(brain_boundary)) % len(brain_boundary)
             return complex(brain_boundary[idx, 0], brain_boundary[idx, 1])
         
-        brain_map = MFSConformalMap(brain_boundary_func, n_boundary=100, n_mfs=80)
+        brain_map = MFSConformalMap(brain_boundary_func, n_boundary=100, n_charge=80)
         
         # Forward solver
         conformal_forward = ConformalForwardSolver(brain_map, n_sensors)
@@ -763,7 +763,7 @@ def create_comparison_plot_custom(sources_true, results, domain_type, output_dir
         # Plot true sources
         for i, (x, y, q) in enumerate(zip(true_x, true_y, true_q)):
             color = 'red' if q > 0 else 'blue'
-            ax.scatter(x, y, c=color, s=150, marker='*', edgecolors='black', linewidths=1, zorder=10)
+            ax.scatter(x, y, s=200, marker='*', facecolors='none', edgecolors=color, linewidths=2, zorder=10)
         
         if 'sources' in data:
             # Nonlinear result

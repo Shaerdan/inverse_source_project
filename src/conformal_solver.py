@@ -244,31 +244,55 @@ class MFSConformalMap:
         return w[0] if scalar else w
     
     def from_disk(self, w: np.ndarray) -> np.ndarray:
-        """Map from unit disk to physical domain (inverse map)."""
+        """Map from unit disk to physical domain (inverse map).
+        
+        Uses boundary interpolation for initial guess, then Newton iteration.
+        """
         w = np.asarray(w, dtype=complex)
         scalar = w.ndim == 0
         w = np.atleast_1d(w)
         
         z = np.zeros_like(w)
         
+        # Pre-compute boundary correspondence: for each theta in disk,
+        # find corresponding point on physical boundary
+        # theta_boundary[i] corresponds to z_boundary[i]
+        
         for i, wi in enumerate(w):
             if np.abs(wi) < 1e-14:
                 z[i] = self.centroid
             else:
-                # Use Newton iteration to invert the map
                 r = np.abs(wi)
                 theta = np.angle(wi)
                 
-                # Initial guess using boundary interpolation
-                z_guess = self.centroid + r * self.char_size * np.exp(1j * theta)
+                # Better initial guess: interpolate boundary point at this angle,
+                # then scale toward centroid
+                # Find boundary point with closest theta_boundary to theta
+                theta_diff = np.abs(np.angle(np.exp(1j * (self.theta_boundary - theta))))
+                idx = np.argmin(theta_diff)
+                z_boundary_at_theta = self.z_boundary[idx]
                 
-                # Newton iteration
-                for _ in range(5):
+                # Initial guess: linear interpolation from centroid to boundary
+                z_guess = self.centroid + r * (z_boundary_at_theta - self.centroid)
+                
+                # Newton iteration with damping and more iterations
+                best_z = z_guess
+                best_err = np.inf
+                
+                for iteration in range(20):  # More iterations
                     w_current = self.to_disk(np.array([z_guess]))[0]
-                    if np.abs(w_current - wi) < 1e-10:
+                    err = np.abs(w_current - wi)
+                    
+                    # Track best solution
+                    if err < best_err:
+                        best_err = err
+                        best_z = z_guess
+                    
+                    if err < 1e-10:
                         break
+                    
                     # Numerical derivative
-                    eps = 1e-6 * self.char_size
+                    eps = 1e-7 * max(self.char_size, np.abs(z_guess - self.centroid))
                     dw_dx = (self.to_disk(np.array([z_guess + eps]))[0] - w_current) / eps
                     dw_dy = (self.to_disk(np.array([z_guess + 1j*eps]))[0] - w_current) / eps
                     
@@ -276,13 +300,29 @@ class MFSConformalMap:
                     dw = wi - w_current
                     J = np.array([[np.real(dw_dx), np.real(dw_dy)],
                                   [np.imag(dw_dx), np.imag(dw_dy)]])
+                    
                     try:
+                        det = J[0,0]*J[1,1] - J[0,1]*J[1,0]
+                        if np.abs(det) < 1e-14:
+                            break
                         delta = np.linalg.solve(J, [np.real(dw), np.imag(dw)])
-                        z_guess = z_guess + delta[0] + 1j * delta[1]
+                        
+                        # Damped Newton step to prevent divergence
+                        step_size = 1.0
+                        for _ in range(5):  # Line search
+                            z_new = z_guess + step_size * (delta[0] + 1j * delta[1])
+                            w_new = self.to_disk(np.array([z_new]))[0]
+                            if np.abs(w_new - wi) < err:
+                                z_guess = z_new
+                                break
+                            step_size *= 0.5
+                        else:
+                            # Line search failed, take small step anyway
+                            z_guess = z_guess + 0.1 * (delta[0] + 1j * delta[1])
                     except:
                         break
                 
-                z[i] = z_guess
+                z[i] = best_z
         
         return z[0] if scalar else z
     
@@ -1414,12 +1454,28 @@ class ConformalNonlinearInverseSolver:
         
         Used with NonlinearConstraint (DE, trust-constr) where constraint
         is handled separately.
+        
+        Returns large penalty if sources are outside domain (needed because
+        SLSQP may evaluate at infeasible points during line search).
         """
         n = self.n_sources
         
         # Unpack parameters
         positions = params[:2*n].reshape(n, 2)
         intensities = params[2*n:3*n]
+        
+        # Check if sources are inside domain via conformal map
+        z_sources = positions[:, 0] + 1j * positions[:, 1]
+        try:
+            w_sources = self.map.to_disk(z_sources)
+            w_abs_sq = np.abs(w_sources)**2
+            
+            # If any source is outside domain (|w| >= 1), return penalty
+            if np.any(w_abs_sq >= 1.0):
+                return 1e12
+        except Exception:
+            # Conformal map failed (point too far from domain)
+            return 1e12
         
         # Enforce zero-sum constraint
         intensities = intensities - np.mean(intensities)
@@ -1481,15 +1537,22 @@ class ConformalNonlinearInverseSolver:
         
         Returns array of (1 - |w_k|²) for each source, where w_k = f(z_k).
         Constraint satisfied when all values > 0 (source inside domain).
+        
+        Returns large negative values if conformal map fails (indicating
+        source is way outside domain).
         """
         n = self.n_sources
         positions = params[:2*n].reshape(n, 2)
         
         z_sources = positions[:, 0] + 1j * positions[:, 1]
-        w_sources = self.map.to_disk(z_sources)
-        w_abs_sq = np.abs(w_sources)**2
         
-        return 1.0 - w_abs_sq
+        try:
+            w_sources = self.map.to_disk(z_sources)
+            w_abs_sq = np.abs(w_sources)**2
+            return 1.0 - w_abs_sq
+        except Exception:
+            # Conformal map failed - return large negative (constraint violated)
+            return -1e6 * np.ones(n)
     
     def _generate_valid_initial_guess(self, bounds: list, seed: int, 
                                        strategy: str = 'random') -> np.ndarray:
