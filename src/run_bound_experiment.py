@@ -81,16 +81,16 @@ def run_experiment(domain, rho, sigma_noise, sensors, restarts, seed, threshold,
     results_data = []
     for r in results:
         results_data.append({
-            'N_tested': r.N_tested,
-            'rho_target': r.rho_target,
+            'N_tested': int(r.N_tested),
+            'rho_target': float(r.rho_target),
             'rho_actual': [float(x) for x in r.rho_actual],
             'rho_min': float(np.min(r.rho_actual)),
-            'sigma_four': r.sigma_four,
-            'N_max_theory': r.N_max_theory,
-            'expected_success': r.expected_success,
-            'actual_success': r.actual_success,
-            'position_rmse': r.position_rmse,
-            'time_seconds': r.time_seconds,
+            'sigma_four': float(r.sigma_four),
+            'N_max_theory': float(r.N_max_theory),
+            'expected_success': bool(r.expected_success),
+            'actual_success': bool(r.actual_success),
+            'position_rmse': float(r.position_rmse),
+            'time_seconds': float(r.time_seconds),
         })
     
     results_path = os.path.join(output_dir, 'results.json')

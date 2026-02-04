@@ -13,6 +13,9 @@ build/
 results/
 slurm_jobs/
 logs/
+*_results/
+slurm_statistical/
+*plots/
 
 # Windows
 *:Zone.Identifier
