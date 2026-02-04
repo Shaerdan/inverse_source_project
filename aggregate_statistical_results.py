@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-Aggregate Statistical Validation Results
-=========================================
+Aggregate Source Configuration Experiment Results (v2)
+=======================================================
 
-Loads results from all seeds, computes summary statistics, generates plots.
+Comprehensive analysis for different source configurations:
+  - same_radius: Expected N_max = n*
+  - same_angle:  Expected N_max = (1/2)n*
+  - general:     Expected N_max = (2/3)n*
 
-Implements three analyses from spec:
-1. Validate actual-noise bound (PRIMARY)
-2. Statistical distribution of n*_actual (68/32 split)
-3. Predictive power comparison
+For each test case, checks if the CORRECT formula predicts N_transition.
 
 Usage:
-    python aggregate_statistical_results.py --results-dir stat_results/
+    # Aggregate single test case
+    python aggregate_statistical_results.py --results-dir stat_results_same_radius
+
+    # Aggregate all test cases and compare
+    python aggregate_statistical_results.py --all-cases
+
+    # Custom directories
+    python aggregate_statistical_results.py --results-dirs stat_results_same_radius stat_results_general
 """
 
 import os
@@ -20,7 +27,26 @@ import argparse
 import numpy as np
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
+
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+TEST_CASES = ['same_radius', 'same_angle', 'general']
+
+EXPECTED_FORMULAS = {
+    'same_radius': 'N_max = n*',
+    'same_angle': 'N_max = (1/2)n*',
+    'general': 'N_max = (2/3)n*',
+}
+
+FORMULA_MULTIPLIERS = {
+    'same_radius': 1.0,      # N_max = 1.0 * n*
+    'same_angle': 0.5,       # N_max = 0.5 * n*
+    'general': 2.0/3.0,      # N_max = (2/3) * n*
+}
 
 
 # =============================================================================
@@ -29,126 +55,249 @@ from typing import Dict, List, Any
 
 def find_result_folders(base_dir: str) -> List[str]:
     """Find all result folders containing results.json"""
+    if not os.path.exists(base_dir):
+        return []
+    
     folders = []
     for name in os.listdir(base_dir):
         path = os.path.join(base_dir, name)
-        if os.path.isdir(path) and 'results.json' in os.listdir(path):
-            folders.append(path)
+        if os.path.isdir(path):
+            results_file = os.path.join(path, 'results.json')
+            if os.path.exists(results_file):
+                folders.append(path)
     return sorted(folders)
 
 
 def load_all_results(base_dir: str) -> List[dict]:
     """Load results.json from all seed folders."""
     folders = find_result_folders(base_dir)
-    print(f"Found {len(folders)} result folders")
+    
+    if not folders:
+        print(f"  Warning: No results found in {base_dir}")
+        return []
+    
+    print(f"  Found {len(folders)} result folders in {base_dir}")
     
     results = []
     for folder in folders:
         results_path = os.path.join(folder, 'results.json')
         config_path = os.path.join(folder, 'config.json')
         
-        with open(results_path, 'r') as f:
-            result = json.load(f)
-        
-        # Also load config for reference values
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                result['n_star_predicted'] = config.get('n_star_predicted')
-                result['N_max_predicted'] = config.get('N_max_predicted')
-        
-        results.append(result)
+        try:
+            with open(results_path, 'r') as f:
+                result = json.load(f)
+            
+            # Also load config for reference values
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    result['_config'] = config
+            
+            results.append(result)
+        except Exception as e:
+            print(f"    Error loading {results_path}: {e}")
     
     return results
 
 
 # =============================================================================
-# ANALYSIS FUNCTIONS
+# TRANSITION DETECTION
 # =============================================================================
 
-def compute_summary_statistics(results: List[dict]) -> dict:
+def detect_transition_ratio(rmse_dict: Dict, ratio_threshold: float = 2.0) -> int:
+    """Detect transition using ratio method."""
+    rmse_dict_int = {int(k): v for k, v in rmse_dict.items()}
+    N_values = sorted(rmse_dict_int.keys())
+    
+    for i in range(len(N_values) - 1):
+        N_curr = N_values[i]
+        N_next = N_values[i + 1]
+        
+        rmse_curr = rmse_dict_int[N_curr]
+        rmse_next = rmse_dict_int[N_next]
+        
+        if rmse_curr > 0:
+            ratio = rmse_next / rmse_curr
+            if ratio > ratio_threshold:
+                return N_next
+    
+    return N_values[-1]
+
+
+def compute_all_transitions(result: dict) -> dict:
+    """Compute transition points from all RMSE types."""
+    transitions = {}
+    
+    rmse_pos = result.get('rmse_position', result.get('rmse', {}))
+    if rmse_pos:
+        transitions['N_transition_position'] = detect_transition_ratio(rmse_pos)
+    else:
+        transitions['N_transition_position'] = None
+    
+    rmse_int = result.get('rmse_intensity', {})
+    if rmse_int:
+        transitions['N_transition_intensity'] = detect_transition_ratio(rmse_int)
+    else:
+        transitions['N_transition_intensity'] = None
+    
+    pos_trans = transitions['N_transition_position']
+    int_trans = transitions['N_transition_intensity']
+    
+    if pos_trans is not None and int_trans is not None:
+        transitions['N_transition_either'] = min(pos_trans, int_trans)
+    elif pos_trans is not None:
+        transitions['N_transition_either'] = pos_trans
+    elif int_trans is not None:
+        transitions['N_transition_either'] = int_trans
+    else:
+        transitions['N_transition_either'] = None
+    
+    return transitions
+
+
+# =============================================================================
+# ANALYSIS FOR SINGLE TEST CASE
+# =============================================================================
+
+def safe_correlation(x: np.ndarray, y: np.ndarray) -> float:
+    """Compute correlation, handling edge cases."""
+    if len(x) < 2 or len(y) < 2:
+        return 0.0
+    if np.std(x) == 0 or np.std(y) == 0:
+        return 0.0
+    corr = np.corrcoef(x, y)[0, 1]
+    return float(corr) if not np.isnan(corr) else 0.0
+
+
+def analyze_test_case(results: List[dict], test_case: str = None) -> dict:
     """
-    Compute all summary statistics per spec.
+    Analyze results for a single test case.
     
-    Analysis 1: Validate actual-noise bound
-    Analysis 2: Distribution of n*_actual
-    Analysis 3: Predictive power comparison
+    Computes N_max using all three formulas and checks which one
+    best predicts N_transition.
     """
-    n_seeds = len(results)
+    if not results:
+        return {'error': 'No results to analyze'}
     
-    # Extract arrays
-    n_star_actual_arr = np.array([r['n_star_actual'] for r in results])
-    N_max_actual_arr = np.array([r['N_max_actual'] for r in results])
-    N_transition_arr = np.array([r['N_transition'] for r in results])
+    # Auto-detect test case from results if not specified
+    if test_case is None:
+        test_case = results[0].get('test_case', 'unknown')
     
-    # Reference values (should be same for all, take from first)
-    n_star_predicted = results[0].get('n_star_predicted', 25.8)
-    N_max_predicted = results[0].get('N_max_predicted', 17.2)
+    # Collect data
+    data = {
+        'n_star_max': [],
+        'N_max_same_radius': [],    # N_max = n*
+        'N_max_same_angle': [],     # N_max = (1/2)n*
+        'N_max_general': [],        # N_max = (2/3)n*
+        'N_max_expected': [],       # N_max using correct formula for this test case
+        'N_transition_position': [],
+        'N_transition_intensity': [],
+        'N_transition_either': [],
+    }
     
-    # =========================================================================
-    # Analysis 1: Validate actual-noise bound
-    # =========================================================================
+    for result in results:
+        n_star = result.get('n_star_max', result.get('n_star_actual', 0))
+        
+        data['n_star_max'].append(n_star)
+        data['N_max_same_radius'].append(n_star)           # 1.0 * n*
+        data['N_max_same_angle'].append(0.5 * n_star)      # 0.5 * n*
+        data['N_max_general'].append((2.0/3.0) * n_star)   # (2/3) * n*
+        
+        # Expected N_max for THIS test case
+        multiplier = FORMULA_MULTIPLIERS.get(test_case, 2.0/3.0)
+        data['N_max_expected'].append(multiplier * n_star)
+        
+        # Transitions
+        transitions = compute_all_transitions(result)
+        data['N_transition_position'].append(transitions['N_transition_position'])
+        data['N_transition_intensity'].append(transitions['N_transition_intensity'])
+        data['N_transition_either'].append(transitions['N_transition_either'])
     
-    # Correlation between N_max_actual and N_transition
-    corr_actual = np.corrcoef(N_max_actual_arr, N_transition_arr)[0, 1]
+    # Convert to arrays
+    for key in data:
+        data[key] = np.array([x if x is not None else np.nan for x in data[key]])
     
-    # Error: N_transition - N_max_actual
-    error_actual = N_transition_arr - N_max_actual_arr
-    mean_error_actual = np.mean(error_actual)
-    std_error_actual = np.std(error_actual)
+    # Compute correlations and errors for each formula vs each transition type
+    formulas = ['N_max_same_radius', 'N_max_same_angle', 'N_max_general']
+    transitions = ['N_transition_position', 'N_transition_intensity', 'N_transition_either']
     
-    # =========================================================================
-    # Analysis 2: Distribution of n*_actual
-    # =========================================================================
+    correlations = {}
+    errors = {}
     
-    n_star_actual_mean = np.mean(n_star_actual_arr)
-    n_star_actual_std = np.std(n_star_actual_arr)
+    for formula in formulas:
+        correlations[formula] = {}
+        errors[formula] = {}
+        
+        formula_data = data[formula]
+        valid_formula = ~np.isnan(formula_data)
+        
+        for trans in transitions:
+            trans_data = data[trans]
+            valid_trans = ~np.isnan(trans_data)
+            valid = valid_formula & valid_trans
+            
+            if np.sum(valid) >= 2:
+                corr = safe_correlation(formula_data[valid], trans_data[valid])
+                error = trans_data[valid] - formula_data[valid]
+                
+                correlations[formula][trans] = corr
+                errors[formula][trans] = {
+                    'mean': float(np.mean(error)),
+                    'std': float(np.std(error)),
+                    'n': int(np.sum(valid)),
+                }
+            else:
+                correlations[formula][trans] = 0.0
+                errors[formula][trans] = {'mean': 0.0, 'std': 0.0, 'n': 0}
     
-    # 68/32 split verification
-    fraction_above = np.mean(n_star_actual_arr >= n_star_predicted)
-    fraction_below = np.mean(n_star_actual_arr < n_star_predicted)
+    # Find best formula for this test case
+    expected_formula = {
+        'same_radius': 'N_max_same_radius',
+        'same_angle': 'N_max_same_angle',
+        'general': 'N_max_general',
+    }.get(test_case, 'N_max_general')
     
-    # =========================================================================
-    # Analysis 3: Predictive power comparison
-    # =========================================================================
+    # Check if expected formula is indeed the best
+    best_corr = -1
+    best_formula = ''
+    for formula in formulas:
+        corr = correlations[formula]['N_transition_position']
+        if corr > best_corr:
+            best_corr = corr
+            best_formula = formula
     
-    # N_max_predicted is constant, so correlation is technically undefined
-    # But we can still compute error statistics
-    error_predicted = N_transition_arr - N_max_predicted
-    mean_error_predicted = np.mean(error_predicted)
-    std_error_predicted = np.std(error_predicted)
-    
-    # For correlation, use variance of N_transition
-    # If N_max_predicted is constant, correlation = 0
-    corr_predicted = 0.0  # By definition (constant predictor)
-    
-    # Also compute N_transition statistics
-    N_transition_mean = np.mean(N_transition_arr)
-    N_transition_std = np.std(N_transition_arr)
-    
+    # Summary
     summary = {
-        # Analysis 1: Actual-noise bound
-        'correlation_Nmax_actual_vs_Ntransition': float(corr_actual),
-        'mean_error_actual_bound': float(mean_error_actual),
-        'std_error_actual_bound': float(std_error_actual),
+        'test_case': test_case,
+        'expected_formula': EXPECTED_FORMULAS.get(test_case, 'unknown'),
+        'n_seeds': len(results),
         
-        # Analysis 2: n*_actual distribution
-        'n_star_predicted': float(n_star_predicted),
-        'n_star_actual_mean': float(n_star_actual_mean),
-        'n_star_actual_std': float(n_star_actual_std),
-        'fraction_n_star_above_predicted': float(fraction_above),
-        'fraction_n_star_below_predicted': float(fraction_below),
+        # n* statistics
+        'n_star_max_mean': float(np.nanmean(data['n_star_max'])),
+        'n_star_max_std': float(np.nanstd(data['n_star_max'])),
         
-        # Analysis 3: Predictive power comparison
-        'N_max_predicted': float(N_max_predicted),
-        'correlation_Nmax_predicted_vs_Ntransition': float(corr_predicted),
-        'mean_error_predicted_bound': float(mean_error_predicted),
-        'std_error_predicted_bound': float(std_error_predicted),
+        # Expected N_max (using correct formula)
+        'N_max_expected_mean': float(np.nanmean(data['N_max_expected'])),
+        'N_max_expected_std': float(np.nanstd(data['N_max_expected'])),
         
-        # Additional statistics
-        'N_transition_mean': float(N_transition_mean),
-        'N_transition_std': float(N_transition_std),
-        'n_seeds': n_seeds,
+        # Transitions
+        'N_transition_position_mean': float(np.nanmean(data['N_transition_position'])),
+        'N_transition_position_std': float(np.nanstd(data['N_transition_position'])),
+        
+        # Correlation with expected formula
+        'correlation_expected': correlations[expected_formula]['N_transition_position'],
+        'error_expected_mean': errors[expected_formula]['N_transition_position']['mean'],
+        'error_expected_std': errors[expected_formula]['N_transition_position']['std'],
+        
+        # Best formula found
+        'best_formula': best_formula,
+        'best_correlation': best_corr,
+        'expected_is_best': best_formula == expected_formula,
+        
+        # Full correlation matrix
+        'correlation_matrix': correlations,
+        'error_matrix': errors,
+        'raw_data': {k: v.tolist() for k, v in data.items()},
     }
     
     return summary
@@ -158,185 +307,189 @@ def compute_summary_statistics(results: List[dict]) -> dict:
 # PLOTTING
 # =============================================================================
 
-def generate_plots(results: List[dict], summary: dict, output_dir: str):
-    """Generate all 4 plots per spec."""
+def generate_plots_single_case(results: List[dict], summary: dict, output_dir: str, test_case: str):
+    """Generate plots for a single test case."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     
     os.makedirs(output_dir, exist_ok=True)
     
-    # Extract arrays
-    n_star_actual_arr = np.array([r['n_star_actual'] for r in results])
-    N_max_actual_arr = np.array([r['N_max_actual'] for r in results])
-    N_transition_arr = np.array([r['N_transition'] for r in results])
-    n_star_predicted = summary['n_star_predicted']
-    N_max_predicted = summary['N_max_predicted']
+    data = {k: np.array(v) for k, v in summary['raw_data'].items()}
     
     # =========================================================================
-    # Plot 1: N_transition vs N_max_actual (KEY PLOT)
+    # Plot 1: N_transition vs N_max (3 formulas)
     # =========================================================================
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    ax.scatter(N_max_actual_arr, N_transition_arr, alpha=0.6, s=50, c='blue', edgecolors='black')
+    formulas = [
+        ('N_max_same_radius', 'N_max = n*', 'steelblue'),
+        ('N_max_same_angle', 'N_max = (1/2)n*', 'seagreen'),
+        ('N_max_general', 'N_max = (2/3)n*', 'coral'),
+    ]
     
-    # y=x line
-    min_val = min(N_max_actual_arr.min(), N_transition_arr.min()) - 1
-    max_val = max(N_max_actual_arr.max(), N_transition_arr.max()) + 1
-    ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='y = x')
+    expected_formula = {
+        'same_radius': 'N_max_same_radius',
+        'same_angle': 'N_max_same_angle',
+        'general': 'N_max_general',
+    }.get(test_case, 'N_max_general')
     
-    ax.set_xlabel('N_max_actual (from actual |η̂_n|)', fontsize=12)
-    ax.set_ylabel('N_transition (observed)', fontsize=12)
-    ax.set_title(f'PRIMARY VALIDATION: N_transition vs N_max_actual\n'
-                 f'Correlation = {summary["correlation_Nmax_actual_vs_Ntransition"]:.3f}', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_aspect('equal')
+    for idx, (formula_key, formula_label, color) in enumerate(formulas):
+        ax = axes[idx]
+        
+        pred_data = data[formula_key]
+        trans_data = data['N_transition_position']
+        valid = ~np.isnan(pred_data) & ~np.isnan(trans_data)
+        
+        if np.sum(valid) > 0:
+            ax.scatter(pred_data[valid], trans_data[valid], alpha=0.6, s=50, 
+                      color=color, edgecolors='black', linewidth=0.5)
+            
+            min_val = min(np.nanmin(pred_data[valid]), np.nanmin(trans_data[valid])) - 1
+            max_val = max(np.nanmax(pred_data[valid]), np.nanmax(trans_data[valid])) + 1
+            ax.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, alpha=0.7)
+            
+            corr = summary['correlation_matrix'][formula_key]['N_transition_position']
+            
+            # Mark if this is the expected formula
+            title_suffix = " (EXPECTED)" if formula_key == expected_formula else ""
+            ax.set_title(f'{formula_label}{title_suffix}\nCorr = {corr:.3f}', 
+                        fontsize=12, fontweight='bold')
+        
+        ax.set_xlabel('N_max (predicted)', fontsize=11)
+        ax.set_ylabel('N_transition (actual)', fontsize=11)
+        ax.grid(True, alpha=0.3)
     
+    plt.suptitle(f'Test Case: {test_case}\nN_transition vs N_max (Different Formulas)', 
+                fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'Ntransition_vs_Nmax_actual.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, f'{test_case}_formula_comparison.png'), dpi=150)
     plt.close()
-    print(f"  Saved: Ntransition_vs_Nmax_actual.png")
+    print(f"  Saved: {test_case}_formula_comparison.png")
     
     # =========================================================================
-    # Plot 2: Histogram of n*_actual
+    # Plot 2: n* distribution
     # =========================================================================
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    ax.hist(n_star_actual_arr, bins=15, alpha=0.7, color='steelblue', edgecolor='black')
-    ax.axvline(x=n_star_predicted, color='red', linestyle='--', linewidth=2, 
-               label=f'n*_predicted = {n_star_predicted:.1f}')
-    
-    # Annotate 68/32 split
-    frac_above = summary['fraction_n_star_above_predicted']
-    frac_below = summary['fraction_n_star_below_predicted']
-    ax.text(0.95, 0.95, f'Above: {frac_above:.1%}\nBelow: {frac_below:.1%}\n(Expected: 68%/32%)',
-            transform=ax.transAxes, ha='right', va='top', fontsize=11,
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    ax.set_xlabel('n*_actual', fontsize=12)
+    valid = ~np.isnan(data['n_star_max'])
+    ax.hist(data['n_star_max'][valid], bins=15, alpha=0.7, color='steelblue', edgecolor='black')
+    ax.axvline(x=np.nanmean(data['n_star_max']), color='red', linestyle='--', 
+               linewidth=2, label=f'Mean = {np.nanmean(data["n_star_max"]):.1f}')
+    ax.set_xlabel('n*_max (max usable mode)', fontsize=12)
     ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'Distribution of n*_actual\n'
-                 f'Mean = {summary["n_star_actual_mean"]:.2f}, Std = {summary["n_star_actual_std"]:.2f}', 
-                 fontsize=14)
+    ax.set_title(f'Test Case: {test_case}\nn* Distribution', fontsize=14)
     ax.legend()
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'n_star_histogram.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, f'{test_case}_n_star_histogram.png'), dpi=150)
     plt.close()
-    print(f"  Saved: n_star_histogram.png")
+    print(f"  Saved: {test_case}_n_star_histogram.png")
     
     # =========================================================================
-    # Plot 3: RMSE vs N, all seeds overlaid (Position and Intensity)
+    # Plot 3: Error histogram (expected formula)
+    # =========================================================================
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    pred_data = data['N_max_expected']
+    trans_data = data['N_transition_position']
+    valid = ~np.isnan(pred_data) & ~np.isnan(trans_data)
+    
+    if np.sum(valid) > 0:
+        error = trans_data[valid] - pred_data[valid]
+        ax.hist(error, bins=15, alpha=0.7, color='purple', edgecolor='black')
+        ax.axvline(x=0, color='red', linestyle='--', linewidth=2)
+        ax.axvline(x=np.mean(error), color='green', linestyle='-', linewidth=2,
+                  label=f'Mean = {np.mean(error):.2f}')
+        ax.set_xlabel(f'N_transition - N_max_expected', fontsize=12)
+        ax.set_ylabel('Count', fontsize=12)
+        ax.set_title(f'Test Case: {test_case}\nError Distribution (using {EXPECTED_FORMULAS[test_case]})\n'
+                    f'Mean = {np.mean(error):.2f}, Std = {np.std(error):.2f}', fontsize=14)
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{test_case}_error_histogram.png'), dpi=150)
+    plt.close()
+    print(f"  Saved: {test_case}_error_histogram.png")
+    
+    # =========================================================================
+    # Plot 4: RMSE curves
     # =========================================================================
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Get N values from first result
-    first_rmse = results[0].get('rmse_position', results[0].get('rmse', {}))
-    N_values = sorted([int(k) for k in first_rmse.keys()])
+    N_max_expected_mean = np.nanmean(data['N_max_expected'])
     
-    # --- Left: Position RMSE ---
-    ax = axes[0]
     for result in results:
-        rmse_dict = result.get('rmse_position', result.get('rmse', {}))
-        N_vals = sorted([int(k) for k in rmse_dict.keys()])
-        rmse_vals = [rmse_dict[str(N)] if str(N) in rmse_dict else rmse_dict.get(N, 0) for N in N_vals]
-        ax.plot(N_vals, rmse_vals, 'b-', alpha=0.15, linewidth=1)
-    
-    # Compute and plot median
-    rmse_by_N = defaultdict(list)
-    for result in results:
-        rmse_dict = result.get('rmse_position', result.get('rmse', {}))
-        for N_str, rmse in rmse_dict.items():
-            rmse_by_N[int(N_str)].append(rmse)
-    
-    N_sorted = sorted(rmse_by_N.keys())
-    median_rmse = [np.median(rmse_by_N[N]) for N in N_sorted]
-    ax.plot(N_sorted, median_rmse, 'r-', linewidth=3, label='Median', zorder=10)
-    
-    ax.axvline(x=N_max_predicted, color='green', linestyle='--', linewidth=2, 
-               label=f'N_max_predicted = {N_max_predicted:.1f}')
-    
-    ax.set_xlabel('Number of Sources (N)', fontsize=12)
-    ax.set_ylabel('Position RMSE', fontsize=12)
-    ax.set_title(f'Position RMSE vs N: All {len(results)} Seeds', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_yscale('log')
-    
-    # --- Right: Intensity RMSE ---
-    ax = axes[1]
-    has_intensity = 'rmse_intensity' in results[0]
-    
-    if has_intensity:
-        for result in results:
-            rmse_dict = result.get('rmse_intensity', {})
-            N_vals = sorted([int(k) for k in rmse_dict.keys()])
-            rmse_vals = [rmse_dict[str(N)] if str(N) in rmse_dict else rmse_dict.get(N, 0) for N in N_vals]
-            ax.plot(N_vals, rmse_vals, 'b-', alpha=0.15, linewidth=1)
+        rmse_pos = result.get('rmse_position', result.get('rmse', {}))
+        if rmse_pos:
+            N_vals = sorted([int(k) for k in rmse_pos.keys()])
+            rmse_vals = [rmse_pos.get(str(N), rmse_pos.get(N, 0)) for N in N_vals]
+            axes[0].plot(N_vals, rmse_vals, 'b-', alpha=0.15, linewidth=1)
         
-        # Compute and plot median
-        rmse_by_N = defaultdict(list)
-        for result in results:
-            for N_str, rmse in result.get('rmse_intensity', {}).items():
-                rmse_by_N[int(N_str)].append(rmse)
-        
-        N_sorted = sorted(rmse_by_N.keys())
-        median_rmse = [np.median(rmse_by_N[N]) for N in N_sorted]
-        ax.plot(N_sorted, median_rmse, 'r-', linewidth=3, label='Median', zorder=10)
-        
-        ax.axvline(x=N_max_predicted, color='green', linestyle='--', linewidth=2, 
-                   label=f'N_max_predicted = {N_max_predicted:.1f}')
-        
+        rmse_int = result.get('rmse_intensity', {})
+        if rmse_int:
+            N_vals = sorted([int(k) for k in rmse_int.keys()])
+            rmse_vals = [rmse_int.get(str(N), rmse_int.get(N, 0)) for N in N_vals]
+            axes[1].plot(N_vals, rmse_vals, 'b-', alpha=0.15, linewidth=1)
+    
+    for ax, title in zip(axes, ['Position RMSE', 'Intensity RMSE']):
+        ax.axvline(x=N_max_expected_mean, color='green', linestyle='--', linewidth=2,
+                  label=f'N_max_expected = {N_max_expected_mean:.1f}')
         ax.set_xlabel('Number of Sources (N)', fontsize=12)
-        ax.set_ylabel('Intensity RMSE', fontsize=12)
-        ax.set_title(f'Intensity RMSE vs N: All {len(results)} Seeds', fontsize=14)
+        ax.set_ylabel('RMSE', fontsize=12)
+        ax.set_title(f'{title}', fontsize=14)
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')
-    else:
-        ax.text(0.5, 0.5, 'No intensity RMSE data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title('Intensity RMSE (not available)', fontsize=14)
     
+    plt.suptitle(f'Test Case: {test_case}', fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'rmse_all_seeds.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, f'{test_case}_rmse_curves.png'), dpi=150)
     plt.close()
-    print(f"  Saved: rmse_all_seeds.png")
+    print(f"  Saved: {test_case}_rmse_curves.png")
+
+
+def generate_comparison_plot(all_summaries: Dict[str, dict], output_dir: str):
+    """Generate comparison plot across all test cases."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    os.makedirs(output_dir, exist_ok=True)
     
     # =========================================================================
-    # Plot 4: Error histogram (N_transition - N_max_actual)
+    # Comparison bar chart: Correlation of expected formula
     # =========================================================================
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Left: Error from actual bound
-    error_actual = N_transition_arr - N_max_actual_arr
-    ax1 = axes[0]
-    ax1.hist(error_actual, bins=15, alpha=0.7, color='steelblue', edgecolor='black')
-    ax1.axvline(x=0, color='red', linestyle='--', linewidth=2)
-    ax1.set_xlabel('N_transition - N_max_actual', fontsize=12)
-    ax1.set_ylabel('Count', fontsize=12)
-    ax1.set_title(f'Error: Actual-Noise Bound\n'
-                  f'Mean = {summary["mean_error_actual_bound"]:.2f}, '
-                  f'Std = {summary["std_error_actual_bound"]:.2f}', fontsize=13)
-    ax1.grid(True, alpha=0.3)
+    test_cases = list(all_summaries.keys())
+    correlations = [all_summaries[tc].get('correlation_expected', 0) for tc in test_cases]
+    expected_is_best = [all_summaries[tc].get('expected_is_best', False) for tc in test_cases]
     
-    # Right: Error from predicted bound
-    error_predicted = N_transition_arr - N_max_predicted
-    ax2 = axes[1]
-    ax2.hist(error_predicted, bins=15, alpha=0.7, color='coral', edgecolor='black')
-    ax2.axvline(x=0, color='red', linestyle='--', linewidth=2)
-    ax2.set_xlabel('N_transition - N_max_predicted', fontsize=12)
-    ax2.set_ylabel('Count', fontsize=12)
-    ax2.set_title(f'Error: σ_Four-Based Bound\n'
-                  f'Mean = {summary["mean_error_predicted_bound"]:.2f}, '
-                  f'Std = {summary["std_error_predicted_bound"]:.2f}', fontsize=13)
-    ax2.grid(True, alpha=0.3)
+    colors = ['green' if is_best else 'orange' for is_best in expected_is_best]
+    
+    bars = ax.bar(test_cases, correlations, color=colors, edgecolor='black', alpha=0.7)
+    
+    for i, (tc, corr) in enumerate(zip(test_cases, correlations)):
+        formula = EXPECTED_FORMULAS.get(tc, '?')
+        ax.text(i, corr + 0.02, f'{corr:.3f}', ha='center', fontsize=12, fontweight='bold')
+        ax.text(i, -0.15, formula, ha='center', fontsize=10, style='italic')
+    
+    ax.set_ylabel('Correlation (N_max_expected vs N_transition)', fontsize=12)
+    ax.set_title('Does the Expected Formula Predict Transitions?\n'
+                '(Green = expected formula is best, Orange = another formula is better)', 
+                fontsize=14)
+    ax.set_ylim(-0.2, 1.1)
+    ax.axhline(y=0.7, color='gray', linestyle='--', alpha=0.5, label='Good threshold (0.7)')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'error_histogram.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'test_case_comparison.png'), dpi=150)
     plt.close()
-    print(f"  Saved: error_histogram.png")
+    print(f"  Saved: test_case_comparison.png")
 
 
 # =============================================================================
@@ -344,103 +497,145 @@ def generate_plots(results: List[dict], summary: dict, output_dir: str):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate statistical validation results")
-    parser.add_argument('--results-dir', type=str, default='stat_results',
-                       help='Directory containing seed result folders')
+    parser = argparse.ArgumentParser(description="Aggregate source config experiment results")
+    parser.add_argument('--results-dir', type=str, 
+                       help='Directory containing results for single test case')
+    parser.add_argument('--results-dirs', type=str, nargs='+',
+                       help='Multiple result directories')
+    parser.add_argument('--all-cases', action='store_true',
+                       help='Load all test cases from stat_results_<case>/ directories')
     parser.add_argument('--output', type=str, default='statistical_validation_summary.json',
                        help='Output JSON file')
     parser.add_argument('--no-plots', action='store_true', help='Skip plot generation')
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.results_dir):
-        print(f"Error: Results directory not found: {args.results_dir}")
+    # Determine which directories to load
+    results_dirs = {}
+    
+    if args.all_cases:
+        for tc in TEST_CASES:
+            dir_name = f'stat_results_{tc}'
+            if os.path.exists(dir_name):
+                results_dirs[tc] = dir_name
+    elif args.results_dirs:
+        for dir_path in args.results_dirs:
+            # Try to infer test case from directory name
+            for tc in TEST_CASES:
+                if tc in dir_path:
+                    results_dirs[tc] = dir_path
+                    break
+            else:
+                results_dirs[os.path.basename(dir_path)] = dir_path
+    elif args.results_dir:
+        # Single directory - try to infer test case
+        for tc in TEST_CASES:
+            if tc in args.results_dir:
+                results_dirs[tc] = args.results_dir
+                break
+        else:
+            results_dirs['unknown'] = args.results_dir
+    else:
+        # Default: try all cases
+        for tc in TEST_CASES:
+            dir_name = f'stat_results_{tc}'
+            if os.path.exists(dir_name):
+                results_dirs[tc] = dir_name
+        
+        if not results_dirs:
+            # Fallback to old directory name
+            if os.path.exists('stat_results'):
+                results_dirs['unknown'] = 'stat_results'
+    
+    if not results_dirs:
+        print("Error: No result directories found!")
+        print("Specify --results-dir, --results-dirs, or --all-cases")
         return
     
-    # Load all results
-    print(f"Loading results from {args.results_dir}...")
-    results = load_all_results(args.results_dir)
+    print(f"Loading results from {len(results_dirs)} directories...")
     
-    if not results:
-        print("No results found!")
-        return
+    # Load and analyze each test case
+    all_results = {}
+    all_summaries = {}
     
-    print(f"Loaded {len(results)} seed results")
+    for test_case, dir_path in results_dirs.items():
+        print(f"\n{'='*60}")
+        print(f"TEST CASE: {test_case}")
+        print(f"Directory: {dir_path}")
+        print(f"{'='*60}")
+        
+        results = load_all_results(dir_path)
+        
+        if not results:
+            print(f"  No results found, skipping...")
+            continue
+        
+        all_results[test_case] = results
+        
+        # Analyze
+        summary = analyze_test_case(results, test_case)
+        all_summaries[test_case] = summary
+        
+        # Print summary
+        print(f"\n  Expected formula: {summary.get('expected_formula', 'unknown')}")
+        print(f"  n*_max mean: {summary.get('n_star_max_mean', 0):.2f} ± {summary.get('n_star_max_std', 0):.2f}")
+        print(f"  N_max_expected mean: {summary.get('N_max_expected_mean', 0):.2f}")
+        print(f"  N_transition mean: {summary.get('N_transition_position_mean', 0):.2f}")
+        print(f"  Correlation (expected): {summary.get('correlation_expected', 0):.3f}")
+        print(f"  Error mean: {summary.get('error_expected_mean', 0):.2f} ± {summary.get('error_expected_std', 0):.2f}")
+        print(f"  Expected is best formula: {summary.get('expected_is_best', False)}")
+        
+        # Generate plots
+        if not args.no_plots:
+            plot_dir = f'statistical_plots_{test_case}'
+            print(f"\n  Generating plots in {plot_dir}/...")
+            generate_plots_single_case(results, summary, plot_dir, test_case)
     
-    # Get config from first result
-    first_folder = find_result_folders(args.results_dir)[0]
-    config_path = os.path.join(first_folder, 'config.json')
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    # Generate comparison plot if multiple test cases
+    if len(all_summaries) > 1 and not args.no_plots:
+        print(f"\n{'='*60}")
+        print("GENERATING COMPARISON PLOTS")
+        print(f"{'='*60}")
+        generate_comparison_plot(all_summaries, 'statistical_plots_comparison')
     
-    # Compute summary statistics
-    print("\nComputing summary statistics...")
-    summary = compute_summary_statistics(results)
-    
-    # Build full output per spec
+    # Save combined output
     output_data = {
-        'config': {
-            'domain': config.get('domain', 'disk'),
-            'rho': config.get('rho', 0.7),
-            'sigma_noise': config.get('sigma_noise', 0.001),
-            'n_sensors': config.get('n_sensors', 100),
-            'sigma_four': config.get('sigma_four'),
-            'n_star_predicted': config.get('n_star_predicted'),
-            'N_max_predicted': config.get('N_max_predicted'),
-            'n_seeds': len(results),
-            'N_values_tested': config.get('N_values_tested', [10, 12, 14, 16, 18, 20, 22, 24]),
-        },
-        'results': results,
-        'summary': summary,
+        'timestamp': datetime.now().isoformat(),
+        'test_cases': list(all_summaries.keys()),
+        'summaries': {tc: {k: v for k, v in s.items() if k != 'raw_data'} 
+                     for tc, s in all_summaries.items()},
     }
     
-    # Save JSON
     with open(args.output, 'w') as f:
         json.dump(output_data, f, indent=2)
     print(f"\nSaved: {args.output}")
     
-    # Generate plots
-    if not args.no_plots:
-        print("\nGenerating plots...")
-        plot_dir = 'statistical_plots'
-        generate_plots(results, summary, plot_dir)
-    
-    # Print summary
+    # Final summary
     print(f"\n{'='*70}")
-    print("STATISTICAL VALIDATION SUMMARY")
+    print("FINAL SUMMARY: Does Each Formula Work?")
     print(f"{'='*70}")
+    print(f"{'Test Case':<15} {'Formula':<20} {'Correlation':<12} {'Best?':<8}")
+    print("-" * 70)
     
-    print(f"\nAnalysis 1: Actual-Noise Bound Validation (PRIMARY)")
-    print(f"  Correlation(N_max_actual, N_transition) = {summary['correlation_Nmax_actual_vs_Ntransition']:.3f}")
-    print(f"  Mean error (N_transition - N_max_actual) = {summary['mean_error_actual_bound']:.2f}")
-    print(f"  Std error = {summary['std_error_actual_bound']:.2f}")
+    for tc in TEST_CASES:
+        if tc in all_summaries:
+            s = all_summaries[tc]
+            formula = EXPECTED_FORMULAS[tc]
+            corr = s.get('correlation_expected', 0)
+            is_best = '✓ YES' if s.get('expected_is_best', False) else '✗ NO'
+            print(f"{tc:<15} {formula:<20} {corr:<12.3f} {is_best:<8}")
     
-    print(f"\nAnalysis 2: n*_actual Distribution")
-    print(f"  n*_predicted = {summary['n_star_predicted']:.2f}")
-    print(f"  n*_actual: mean = {summary['n_star_actual_mean']:.2f}, std = {summary['n_star_actual_std']:.2f}")
-    print(f"  Fraction ≥ n*_predicted: {summary['fraction_n_star_above_predicted']:.1%} (expected ~68%)")
-    print(f"  Fraction < n*_predicted: {summary['fraction_n_star_below_predicted']:.1%} (expected ~32%)")
-    
-    print(f"\nAnalysis 3: Predictive Power Comparison")
-    print(f"  N_max_predicted (constant) = {summary['N_max_predicted']:.2f}")
-    print(f"  Mean error (σ_Four bound) = {summary['mean_error_predicted_bound']:.2f}")
-    print(f"  Std error (σ_Four bound) = {summary['std_error_predicted_bound']:.2f}")
-    
-    print(f"\n{'='*70}")
+    print("-" * 70)
     
     # Interpretation
-    if summary['correlation_Nmax_actual_vs_Ntransition'] > 0.8:
-        print("✓ HIGH correlation: Actual-noise bound accurately predicts transition!")
-    elif summary['correlation_Nmax_actual_vs_Ntransition'] > 0.5:
-        print("~ MODERATE correlation: Actual-noise bound has predictive power")
-    else:
-        print("✗ LOW correlation: Actual-noise bound does not predict transition well")
+    all_validated = all(s.get('expected_is_best', False) and s.get('correlation_expected', 0) > 0.5 
+                       for s in all_summaries.values())
     
-    frac_above = summary['fraction_n_star_above_predicted']
-    if 0.60 <= frac_above <= 0.76:
-        print(f"✓ 68/32 split verified: {frac_above:.1%} above (expected ~68%)")
+    if all_validated:
+        print("\n✓ THEORY VALIDATED: Each test case's expected formula best predicts transitions!")
     else:
-        print(f"~ 68/32 split deviation: {frac_above:.1%} above (expected ~68%)")
+        print("\n~ MIXED RESULTS: Not all expected formulas are optimal predictors.")
+        print("  Check individual test case plots for details.")
     
     print(f"{'='*70}\n")
 
