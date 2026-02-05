@@ -52,8 +52,12 @@ SIGMA_NOISE = 0.001
 N_SENSORS = 100
 N_RESTARTS = 15
 
+# Random rho_min defaults
+RHO_MIN_LOW = 0.5
+RHO_MIN_HIGH = 0.6
+
 # Test cases
-TEST_CASES = ['same_radius', 'same_angle', 'general']
+TEST_CASES = ['same_radius', 'same_angle', 'general', 'general_random_intensity']
 
 # =============================================================================
 # SLURM TEMPLATE
@@ -99,7 +103,7 @@ python run_statistical_experiment.py \\
     --sigma-noise {sigma_noise} \\
     --sensors {n_sensors} \\
     --restarts {n_restarts} \\
-    --output-dir {project_dir}/{results_dir}
+    --output-dir {project_dir}/{results_dir}{random_rho_args}
 
 echo "=========================================="
 echo "End: $(date)"
@@ -110,7 +114,8 @@ echo "=========================================="
 # GENERATOR
 # =============================================================================
 
-def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistical'):
+def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistical',
+                           random_rho_min=False, rho_min_low=0.5, rho_min_high=0.6):
     """Generate SLURM scripts for specified test cases."""
     
     os.makedirs(output_base_dir, exist_ok=True)
@@ -119,7 +124,15 @@ def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistic
     print(f"  Test cases: {test_cases}")
     print(f"  Seeds per case: {n_seeds}")
     print(f"  Total jobs: {len(test_cases) * n_seeds}")
+    if random_rho_min:
+        print(f"  Random rho_min: [{rho_min_low}, {rho_min_high}]")
     print()
+    
+    # Build random_rho_args string
+    if random_rho_min:
+        random_rho_args = f" \\\n    --random-rho-min \\\n    --rho-min-low {rho_min_low} \\\n    --rho-min-high {rho_min_high}"
+    else:
+        random_rho_args = ""
     
     all_job_scripts = []
     jobs_by_case = {tc: [] for tc in test_cases}
@@ -127,9 +140,14 @@ def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistic
     for test_case in test_cases:
         # Results directory per test case
         results_dir = f"stat_results_{test_case}"
+        if random_rho_min:
+            results_dir += "_random_rho"
         
         for seed in range(n_seeds):
-            job_name = f"{test_case[:3]}_{seed:03d}"  # e.g., "sam_000", "gen_042"
+            # Abbreviation: sam=same_radius, ang=same_angle, gen=general, gri=general_random_intensity
+            abbrev = {'same_radius': 'sam', 'same_angle': 'ang', 'general': 'gen', 
+                      'general_random_intensity': 'gri'}.get(test_case, test_case[:3])
+            job_name = f"{abbrev}_{seed:03d}"
             
             script_content = SLURM_TEMPLATE.format(
                 job_name=job_name,
@@ -152,6 +170,7 @@ def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistic
                 sigma_noise=SIGMA_NOISE,
                 n_sensors=N_SENSORS,
                 n_restarts=N_RESTARTS,
+                random_rho_args=random_rho_args,
             )
             
             script_name = f"run_{test_case}_seed{seed:03d}.sh"
@@ -243,20 +262,17 @@ def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistic
         f.write(f"  sigma_noise: {SIGMA_NOISE}\n")
         f.write(f"  Sensors: {N_SENSORS}\n")
         f.write(f"  Restarts: {N_RESTARTS}\n")
-        f.write(f"  Seeds per case: {n_seeds}\n\n")
+        f.write(f"  Seeds per case: {n_seeds}\n")
         
-        f.write("  same_radius config:\n")
-        f.write(f"    rho = {RHO}\n")
-        f.write(f"    rho_min = {RHO}\n\n")
-        
-        f.write("  same_angle config:\n")
-        f.write(f"    theta_0 = {THETA_0}\n")
-        f.write(f"    r_min = {R_MIN}, r_max = {R_MAX}\n")
-        f.write(f"    rho_min = {R_MIN}\n\n")
-        
-        f.write("  general config:\n")
-        f.write(f"    r_min = {R_MIN}, r_max = {R_MAX}\n")
-        f.write(f"    rho_min = {R_MIN}\n\n")
+        if random_rho_min:
+            f.write(f"\n  RANDOM rho_min: [{rho_min_low}, {rho_min_high}]\n")
+            f.write(f"    Each seed gets a different rho_min sampled uniformly\n\n")
+        else:
+            f.write(f"\n  FIXED rho_min values:\n")
+            f.write(f"    same_radius: rho = {RHO}\n")
+            f.write(f"    same_angle:  r_min = {R_MIN}, r_max = {R_MAX}\n")
+            f.write(f"    general:     r_min = {R_MIN}, r_max = {R_MAX}\n")
+            f.write(f"    general_random_intensity: r_min = {R_MIN}, r_max = {R_MAX}, I~U(0.5,2)\n\n")
         
         f.write("N values: DYNAMIC\n")
         f.write("  Centered around N_predicted with range ±6, step 2\n")
@@ -264,7 +280,8 @@ def generate_slurm_scripts(test_cases, n_seeds, output_base_dir='slurm_statistic
         
         f.write("Output directories:\n")
         for tc in test_cases:
-            f.write(f"  {tc}: stat_results_{tc}/\n")
+            suffix = "_random_rho" if random_rho_min else ""
+            f.write(f"  {tc}: stat_results_{tc}{suffix}/\n")
         
         f.write("\nSubmit options:\n")
         f.write("-" * 40 + "\n")
@@ -297,6 +314,7 @@ def get_formula_for_case(test_case):
         'same_radius': 'N_max = n*',
         'same_angle': 'N_max = (1/2) n*',
         'general': 'N_max = (2/3) n*',
+        'general_random_intensity': 'N_max = (2/3) n*',
     }
     return formulas.get(test_case, 'unknown')
 
@@ -315,6 +333,12 @@ def main():
                        help=f'Number of seeds per test case (default: {DEFAULT_SEEDS})')
     parser.add_argument('--output-dir', type=str, default='slurm_statistical',
                        help='Output directory for SLURM scripts')
+    parser.add_argument('--random-rho-min', action='store_true',
+                       help='Enable random rho_min sampling per seed')
+    parser.add_argument('--rho-min-low', type=float, default=RHO_MIN_LOW,
+                       help=f'Lower bound for random rho_min (default: {RHO_MIN_LOW})')
+    parser.add_argument('--rho-min-high', type=float, default=RHO_MIN_HIGH,
+                       help=f'Upper bound for random rho_min (default: {RHO_MIN_HIGH})')
     
     args = parser.parse_args()
     
@@ -330,7 +354,14 @@ def main():
         print("Use --test-case <case> to run a specific case.")
         print()
     
-    generate_slurm_scripts(test_cases, args.seeds, args.output_dir)
+    generate_slurm_scripts(
+        test_cases, 
+        args.seeds, 
+        args.output_dir,
+        random_rho_min=args.random_rho_min,
+        rho_min_low=args.rho_min_low,
+        rho_min_high=args.rho_min_high
+    )
 
 
 if __name__ == '__main__':

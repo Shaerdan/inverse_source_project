@@ -69,6 +69,41 @@ def compute_intensity_rmse(true_sources, recovered_sources) -> float:
     return np.sqrt(np.mean(intensity_errors))
 
 
+def compute_total_rmse(true_sources, recovered_sources) -> float:
+    """
+    Compute RMSE over ALL unknown parameters (x, y, S) per matched source.
+    
+    For N sources with 3 unknowns each:
+      total_RMSE = sqrt( (1/N) * sum_i( (x_err_i)^2 + (y_err_i)^2 + (S_err_i)^2 ) / 3 )
+    
+    This gives equal weight to each of the 3N unknowns.
+    """
+    from scipy.optimize import linear_sum_assignment
+    
+    n_true = len(true_sources)
+    n_rec = len(recovered_sources)
+    
+    if n_rec == 0:
+        return float('inf')
+    
+    cost = np.zeros((n_true, n_rec))
+    for i, ((x1, y1), _) in enumerate(true_sources):
+        for j, ((x2, y2), _) in enumerate(recovered_sources):
+            cost[i, j] = np.sqrt((x1-x2)**2 + (y1-y2)**2)
+    
+    row_ind, col_ind = linear_sum_assignment(cost)
+    
+    all_param_errors_sq = []
+    for i, j in zip(row_ind, col_ind):
+        (x1, y1), s1 = true_sources[i]
+        (x2, y2), s2 = recovered_sources[j]
+        all_param_errors_sq.append((x1-x2)**2)
+        all_param_errors_sq.append((y1-y2)**2)
+        all_param_errors_sq.append((s1-s2)**2)
+    
+    return np.sqrt(np.mean(all_param_errors_sq))
+
+
 # =============================================================================
 # THEORETICAL COMPUTATIONS
 # =============================================================================
@@ -107,7 +142,7 @@ def compute_N_max_for_test_case(n_star: float, test_case: str) -> float:
     elif test_case == 'same_angle':
         # Unknowns: 2N (r, I), Equations: n* → N_max = (1/2)n*
         return 0.5 * n_star
-    elif test_case == 'general':
+    elif test_case in ('general', 'general_random_intensity'):
         # Unknowns: 3N (r, θ, I), Equations: 2n* → N_max = (2/3)n*
         return (2.0 / 3.0) * n_star
     else:
@@ -178,6 +213,28 @@ def generate_zero_sum_intensities(n_sources: int) -> np.ndarray:
     """Generate intensities summing to zero: alternating +1/-1."""
     intensities = np.array([1.0 if i % 2 == 0 else -1.0 for i in range(n_sources)])
     intensities = intensities - np.mean(intensities)  # Ensure exact sum = 0
+    return intensities
+
+
+def generate_random_intensities(n_sources: int, seed: int = None,
+                                intensity_low: float = 0.5, 
+                                intensity_high: float = 2.0) -> np.ndarray:
+    """
+    Generate random-magnitude intensities that sum to zero.
+    
+    I_k = U(intensity_low, intensity_high) * (-1)^k, then centered to enforce Σ I_k = 0.
+    This tests whether the bound holds with non-uniform intensities.
+    """
+    if seed is not None:
+        rng = np.random.RandomState(seed)
+    else:
+        rng = np.random
+    
+    magnitudes = rng.uniform(intensity_low, intensity_high, n_sources)
+    signs = np.array([(-1)**k for k in range(n_sources)], dtype=float)
+    intensities = magnitudes * signs
+    intensities -= np.mean(intensities)
+    
     return intensities
 
 
@@ -252,6 +309,7 @@ def generate_sources_general(n_sources: int, r_min: float, r_max: float,
                               seed: int) -> Tuple[List, float]:
     """
     TEST CASE 3: General configuration (random radii, random angles).
+    Intensities: alternating ±1 (uniform magnitude).
     
     Returns
     -------
@@ -281,16 +339,56 @@ def generate_sources_general(n_sources: int, r_min: float, r_max: float,
     return sources, rho_min
 
 
+def generate_sources_general_random_intensity(n_sources: int, r_min: float, r_max: float, 
+                                               seed: int,
+                                               intensity_low: float = 0.5,
+                                               intensity_high: float = 2.0) -> Tuple[List, float]:
+    """
+    TEST CASE 4: General configuration with random-magnitude intensities.
+    
+    Same geometry as 'general' (random radii, random angles), but intensities
+    are I_k = U(intensity_low, intensity_high) * (-1)^k, then centered to enforce Σ I_k = 0.
+    
+    Tests that the bound holds with non-uniform intensity magnitudes.
+    N_max formula: same as general, (2/3)n*.
+    """
+    np.random.seed(seed)
+    
+    # Evenly spaced angles with perturbation
+    base_angles = np.linspace(0, 2 * np.pi, n_sources, endpoint=False)
+    perturbation = 0.1 * (2 * np.pi / n_sources) * np.random.randn(n_sources)
+    angles = base_angles + perturbation
+    
+    # Radii evenly spread in range
+    radii = np.linspace(r_min, r_max, n_sources)
+    
+    # Random-magnitude intensities
+    intensities = generate_random_intensities(n_sources, seed=seed + 99999,
+                                              intensity_low=intensity_low,
+                                              intensity_high=intensity_high)
+    
+    sources = []
+    for i in range(n_sources):
+        x = radii[i] * np.cos(angles[i])
+        y = radii[i] * np.sin(angles[i])
+        sources.append(((x, y), intensities[i]))
+    
+    rho_min = r_min  # Smallest radius
+    return sources, rho_min
+
+
 def generate_sources_for_test_case(test_case: str, n_sources: int, seed: int,
                                     rho: float = 0.7, r_min: float = 0.5, 
-                                    r_max: float = 0.9, theta_0: float = 0.0) -> Tuple[List, float]:
+                                    r_max: float = 0.9, theta_0: float = 0.0,
+                                    intensity_low: float = 0.5,
+                                    intensity_high: float = 2.0) -> Tuple[List, float]:
     """
     Generate sources for the specified test case.
     
     Parameters
     ----------
     test_case : str
-        One of: 'same_radius', 'same_angle', 'general'
+        One of: 'same_radius', 'same_angle', 'general', 'general_random_intensity'
     n_sources : int
         Number of sources
     seed : int
@@ -301,6 +399,8 @@ def generate_sources_for_test_case(test_case: str, n_sources: int, seed: int,
         Radius range for same_angle and general cases
     theta_0 : float
         Common angle for same_angle case
+    intensity_low, intensity_high : float
+        Magnitude range for general_random_intensity case (default: 0.5, 2.0)
     
     Returns
     -------
@@ -314,62 +414,14 @@ def generate_sources_for_test_case(test_case: str, n_sources: int, seed: int,
         return generate_sources_same_angle(n_sources, theta_0, r_min, r_max, seed)
     elif test_case == 'general':
         return generate_sources_general(n_sources, r_min, r_max, seed)
+    elif test_case == 'general_random_intensity':
+        return generate_sources_general_random_intensity(n_sources, r_min, r_max, seed,
+                                                         intensity_low=intensity_low,
+                                                         intensity_high=intensity_high)
     else:
         raise ValueError(f"Unknown test_case: {test_case}")
 
 
-# =============================================================================
-# TRANSITION DETECTION
-# =============================================================================
-
-def detect_N_transition_ratio(rmse_dict: Dict[int, float], ratio_threshold: float = 2.0) -> int:
-    """
-    Detect N_transition using ratio method.
-    Returns first N where RMSE jumps by > ratio_threshold.
-    """
-    N_values = sorted(rmse_dict.keys())
-    
-    for i in range(len(N_values) - 1):
-        N_curr = N_values[i]
-        N_next = N_values[i + 1]
-        
-        rmse_curr = rmse_dict[N_curr]
-        rmse_next = rmse_dict[N_next]
-        
-        if rmse_curr > 0:
-            ratio = rmse_next / rmse_curr
-            if ratio > ratio_threshold:
-                return N_next
-    
-    return N_values[-1]
-
-
-def detect_N_transition_derivative(rmse_dict: Dict[int, float]) -> int:
-    """
-    Detect N_transition using max derivative method.
-    """
-    N_values = sorted(rmse_dict.keys())
-    
-    if len(N_values) < 2:
-        return N_values[0]
-    
-    max_deriv = -np.inf
-    N_transition = N_values[-1]
-    
-    for i in range(len(N_values) - 1):
-        N_curr = N_values[i]
-        N_next = N_values[i + 1]
-        
-        rmse_curr = rmse_dict[N_curr]
-        rmse_next = rmse_dict[N_next]
-        
-        if rmse_curr > 0 and rmse_next > 0:
-            deriv = (np.log(rmse_next) - np.log(rmse_curr)) / (N_next - N_curr)
-            if deriv > max_deriv:
-                max_deriv = deriv
-                N_transition = N_next
-    
-    return N_transition
 
 
 # =============================================================================
@@ -426,7 +478,12 @@ def run_single_seed_validation(
     n_sensors: int = 100,
     n_restarts: int = 15,
     N_values: List[int] = None,
-    use_dynamic_N: bool = True
+    use_dynamic_N: bool = True,
+    random_rho_min: bool = False,
+    rho_min_low: float = 0.5,
+    rho_min_high: float = 0.6,
+    intensity_low: float = 0.5,
+    intensity_high: float = 2.0
 ) -> dict:
     """
     Run statistical validation for ONE seed with specified test case.
@@ -438,7 +495,7 @@ def run_single_seed_validation(
     test_case : str
         One of: 'same_radius', 'same_angle', 'general'
     rho : float
-        Common radius for same_radius case
+        Common radius for same_radius case (used if random_rho_min=False)
     r_min, r_max : float
         Radius range for same_angle and general cases
     theta_0 : float
@@ -453,6 +510,10 @@ def run_single_seed_validation(
         If provided, use these N values instead of dynamic
     use_dynamic_N : bool
         If True and N_values is None, compute N values around prediction
+    random_rho_min : bool
+        If True, randomly sample rho_min from [rho_min_low, rho_min_high]
+    rho_min_low, rho_min_high : float
+        Range for random rho_min sampling
     
     Returns
     -------
@@ -462,10 +523,23 @@ def run_single_seed_validation(
     start_time = time.time()
     
     # Determine rho_min for n* computation based on test case
-    if test_case == 'same_radius':
-        rho_min = rho
+    if random_rho_min:
+        # Use seed to generate reproducible random rho_min
+        rng = np.random.RandomState(seed + 99999)  # Different from noise seed
+        rho_min = rng.uniform(rho_min_low, rho_min_high)
+        # Update rho and r_min to match
+        if test_case == 'same_radius':
+            rho = rho_min
+        else:
+            r_min = rho_min
+            # Keep r_max at fixed offset above r_min
+            r_max = min(r_min + 0.4, 0.95)  # e.g., if r_min=0.55, r_max=0.95
     else:
-        rho_min = r_min
+        # Use fixed values
+        if test_case == 'same_radius':
+            rho_min = rho
+        else:
+            rho_min = r_min
     
     # Setup forward solver
     forward_solver = AnalyticalForwardSolver(n_boundary_points=n_sensors)
@@ -516,13 +590,15 @@ def run_single_seed_validation(
     # =========================================================================
     rmse_position_results = {}
     rmse_intensity_results = {}
+    rmse_total_results = {}
     
     for N in N_values:
         # Generate sources for this test case
         source_seed = seed + 10000 + N
         sources, _ = generate_sources_for_test_case(
             test_case, N, source_seed,
-            rho=rho, r_min=r_min, r_max=r_max, theta_0=theta_0
+            rho=rho, r_min=r_min, r_max=r_max, theta_0=theta_0,
+            intensity_low=intensity_low, intensity_high=intensity_high
         )
         
         # Forward solve
@@ -544,20 +620,13 @@ def run_single_seed_validation(
         # Compute RMSE
         rmse_pos = compute_position_rmse(sources, recovered)
         rmse_int = compute_intensity_rmse(sources, recovered)
+        rmse_tot = compute_total_rmse(sources, recovered)
         
         rmse_position_results[N] = float(rmse_pos)
         rmse_intensity_results[N] = float(rmse_int)
+        rmse_total_results[N] = float(rmse_tot)
         
-        print(f"    N={N}: RMSE_pos = {rmse_pos:.6f}, RMSE_int = {rmse_int:.6f}")
-    
-    # Detect transitions
-    N_transition_pos_ratio = detect_N_transition_ratio(rmse_position_results)
-    N_transition_pos_deriv = detect_N_transition_derivative(rmse_position_results)
-    N_transition_int_ratio = detect_N_transition_ratio(rmse_intensity_results)
-    N_transition_int_deriv = detect_N_transition_derivative(rmse_intensity_results)
-    
-    # Primary transition (position, ratio method)
-    N_transition = N_transition_pos_ratio
+        print(f"    N={N}: RMSE_pos = {rmse_pos:.6f}, RMSE_int = {rmse_int:.6f}, RMSE_total = {rmse_tot:.6f}")
     
     elapsed = time.time() - start_time
     
@@ -573,9 +642,10 @@ def run_single_seed_validation(
         'r_max': float(r_max),
         'theta_0': float(theta_0),
         
-        # RMSE results
+        # RMSE results (keyed by N)
         'rmse_position': rmse_position_results,
         'rmse_intensity': rmse_intensity_results,
+        'rmse_total': rmse_total_results,
         'N_values_tested': [int(n) for n in N_values],
         
         # Noise analysis
@@ -594,17 +664,19 @@ def run_single_seed_validation(
         'n_star_sigma_four': float(n_star_sigma_four),
         'N_max_sigma_four': float(N_max_sigma_four),
         
-        # Transition detection
-        'N_transition': int(N_transition),
-        'N_transition_pos_ratio': int(N_transition_pos_ratio),
-        'N_transition_pos_deriv': int(N_transition_pos_deriv),
-        'N_transition_int_ratio': int(N_transition_int_ratio),
-        'N_transition_int_deriv': int(N_transition_int_deriv),
-        
         # Backward compatibility
         'n_star_actual': int(n_star_max),
         'N_max_actual': float(N_max_predicted),
         'n_star_predicted': float(n_star_sigma_four),
+        
+        # Random rho_min info
+        'random_rho_min': random_rho_min,
+        'rho_min_low': float(rho_min_low) if random_rho_min else None,
+        'rho_min_high': float(rho_min_high) if random_rho_min else None,
+        
+        # Intensity range (for general_random_intensity)
+        'intensity_low': float(intensity_low),
+        'intensity_high': float(intensity_high),
         
         'time_seconds': float(elapsed)
     }
@@ -623,7 +695,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Statistical validation for one seed")
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
     parser.add_argument('--test-case', type=str, default='same_radius',
-                       choices=['same_radius', 'same_angle', 'general'],
+                       choices=['same_radius', 'same_angle', 'general', 'general_random_intensity'],
                        help='Test case type')
     parser.add_argument('--rho', type=float, default=0.7, help='Common radius (same_radius case)')
     parser.add_argument('--r-min', type=float, default=0.5, help='Min radius (same_angle, general)')
@@ -633,6 +705,16 @@ if __name__ == "__main__":
     parser.add_argument('--sensors', type=int, default=100, help='Number of sensors')
     parser.add_argument('--restarts', type=int, default=15, help='Optimizer restarts')
     parser.add_argument('--no-dynamic-N', action='store_true', help='Use fixed N values')
+    parser.add_argument('--random-rho-min', action='store_true', 
+                       help='Randomly sample rho_min per seed')
+    parser.add_argument('--rho-min-low', type=float, default=0.5,
+                       help='Lower bound for random rho_min (default: 0.5)')
+    parser.add_argument('--rho-min-high', type=float, default=0.6,
+                       help='Upper bound for random rho_min (default: 0.6)')
+    parser.add_argument('--intensity-low', type=float, default=0.5,
+                       help='Min intensity magnitude for general_random_intensity (default: 0.5)')
+    parser.add_argument('--intensity-high', type=float, default=2.0,
+                       help='Max intensity magnitude for general_random_intensity (default: 2.0)')
     
     args = parser.parse_args()
     
@@ -640,6 +722,10 @@ if __name__ == "__main__":
     print(f"  Seed: {args.seed}")
     print(f"  Test case: {args.test_case}")
     print(f"  sigma_noise: {args.sigma_noise}, sensors: {args.sensors}")
+    if args.random_rho_min:
+        print(f"  Random rho_min: [{args.rho_min_low}, {args.rho_min_high}]")
+    if args.test_case == 'general_random_intensity':
+        print(f"  Intensity range: [{args.intensity_low}, {args.intensity_high}]")
     
     result = run_single_seed_validation(
         seed=args.seed,
@@ -651,17 +737,22 @@ if __name__ == "__main__":
         sigma_noise=args.sigma_noise,
         n_sensors=args.sensors,
         n_restarts=args.restarts,
-        use_dynamic_N=not args.no_dynamic_N
+        use_dynamic_N=not args.no_dynamic_N,
+        random_rho_min=args.random_rho_min,
+        rho_min_low=args.rho_min_low,
+        rho_min_high=args.rho_min_high,
+        intensity_low=args.intensity_low,
+        intensity_high=args.intensity_high
     )
     
     print(f"\n{'='*60}")
     print(f"RESULTS: Seed {args.seed}, Test Case: {args.test_case}")
     print(f"{'='*60}")
+    print(f"  rho_min = {result['rho_min']:.4f}")
     print(f"  n*_max = {result['n_star_max']}")
     print(f"  K = {result['K']}")
     print(f"  N_max_predicted ({args.test_case}) = {result['N_max_predicted']:.2f}")
-    print(f"  N_transition = {result['N_transition']}")
-    print(f"  Error = {result['N_transition'] - result['N_max_predicted']:.2f}")
-    print(f"  Time: {result['time_seconds']:.1f}s")
-    print(f"\n  RMSE_position: {result['rmse_position']}")
+    print(f"\n  Time: {result['time_seconds']:.1f}s")
+    print(f"\n  RMSE_position:  {result['rmse_position']}")
     print(f"  RMSE_intensity: {result['rmse_intensity']}")
+    print(f"  RMSE_total:     {result['rmse_total']}")

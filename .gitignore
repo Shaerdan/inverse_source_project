@@ -17,6 +17,8 @@ logs/
 slurm_statistical/
 *plots/
 *results*/
+*plots*/
+
 # Windows
 *:Zone.Identifier
 Thumbs.db
