@@ -18,6 +18,8 @@ slurm_statistical/
 *plots/
 *results*/
 *plots*/
+slurm_*/
+
 
 # Windows
 *:Zone.Identifier
