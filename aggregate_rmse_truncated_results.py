@@ -51,6 +51,8 @@ except ImportError:
 
 TEST_CASES = ['same_radius', 'same_angle', 'general', 'general_random_intensity']
 
+DOMAINS = ['disk', 'ellipse', 'brain']
+
 EXPECTED_FORMULAS = {
     'same_radius': 'N_max = n*',
     'same_angle': 'N_max = (1/2)n*',
@@ -98,7 +100,7 @@ def load_results(base_dir: str) -> List[dict]:
 # POOLED DATA CONSTRUCTION
 # =============================================================================
 
-def build_pooled_table(results: List[dict], test_case: str = None) -> Dict[str, np.ndarray]:
+def build_pooled_table(results: List[dict], test_case: str = None, domain: str = None) -> Dict[str, np.ndarray]:
     """
     Pool all (seed, N) data points into arrays.
     
@@ -107,6 +109,8 @@ def build_pooled_table(results: List[dict], test_case: str = None) -> Dict[str, 
     """
     if test_case is None:
         test_case = results[0].get('test_case', 'unknown')
+    if domain is None:
+        domain = results[0].get('domain', 'disk')
     
     rows = {
         'seed': [],
@@ -121,6 +125,7 @@ def build_pooled_table(results: List[dict], test_case: str = None) -> Dict[str, 
         'rmse_total': [],
         'residual': [],
         'below_bound': [],  # 1 if N <= N_max, 0 otherwise
+        'domain': [],
     }
     
     for result in results:
@@ -128,6 +133,7 @@ def build_pooled_table(results: List[dict], test_case: str = None) -> Dict[str, 
         rho_min = result.get('rho_min', 0)
         n_star = result.get('n_star', 0)
         N_max = result.get('N_max', 0)
+        result_domain = result.get('domain', domain)
         
         for nr in result.get('results_by_N', []):
             N = nr['N']
@@ -145,6 +151,7 @@ def build_pooled_table(results: List[dict], test_case: str = None) -> Dict[str, 
             rows['rmse_total'].append(float(nr.get('rmse_total', np.nan)))
             rows['residual'].append(float(nr.get('residual', np.nan)))
             rows['below_bound'].append(1 if N <= N_max else 0)
+            rows['domain'].append(result_domain)
     
     return {k: np.array(v) for k, v in rows.items()}
 
@@ -251,7 +258,7 @@ def compute_binned_statistics(table: Dict[str, np.ndarray]) -> Dict:
 # =============================================================================
 
 def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
-                   binned: Dict, plot_dir: str, test_case: str):
+                   binned: Dict, plot_dir: str, test_case: str, domain: str = 'disk'):
     """Generate all plots for a single test case."""
     if not HAS_MATPLOTLIB:
         print("  matplotlib not available, skipping plots")
@@ -260,6 +267,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
     os.makedirs(plot_dir, exist_ok=True)
     
     formula_str = EXPECTED_FORMULAS.get(test_case, 'unknown')
+    domain_label = domain.upper()
     below = table['below_bound'] == 1
     above = table['below_bound'] == 0
     
@@ -298,7 +306,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
                        label=f'Median above: {med_a:.4f}')
         ax.legend(fontsize=8)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE vs (N − N_max)  |  Formula: {formula_str}\n'
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE vs (N − N_max)  |  Formula: {formula_str}\n'
                  f'{stats["n_seeds"]} seeds, {stats["n_total"]} data points',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
@@ -339,7 +347,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
                        label=f'Median above: {med_a:.4f}')
         ax.legend(fontsize=8)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE vs (N − N_max) [linear]  |  Formula: {formula_str}\n'
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE vs (N − N_max) [linear]  |  Formula: {formula_str}\n'
                  f'{stats["n_seeds"]} seeds, {stats["n_total"]} data points',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
@@ -385,7 +393,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
                    transform=ax.transAxes, ha='center', va='top', fontsize=10,
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE Below vs Above Bound  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE Below vs Above Bound  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_B_boxplots.png'), dpi=150, bbox_inches='tight')
@@ -429,7 +437,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
                    transform=ax.transAxes, ha='center', va='top', fontsize=10,
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE Below vs Above [linear]  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE Below vs Above [linear]  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_B2_boxplots_linear.png'), dpi=150, bbox_inches='tight')
@@ -469,7 +477,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: Binned Median RMSE  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: Binned Median RMSE  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_C_binned.png'), dpi=150, bbox_inches='tight')
@@ -506,7 +514,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: Binned Median RMSE (linear)  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: Binned Median RMSE (linear)  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_C2_binned_linear.png'), dpi=150, bbox_inches='tight')
@@ -557,7 +565,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE vs N (all seeds)  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE vs N (all seeds)  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_D_rmse_vs_N.png'), dpi=150, bbox_inches='tight')
@@ -606,7 +614,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
     
-    fig.suptitle(f'{test_case} [TRUNCATED]: RMSE vs N (linear scale)  |  {formula_str}',
+    fig.suptitle(f'{domain_label} [{test_case}] TRUNCATED: RMSE vs N (linear scale)  |  {formula_str}',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, 'plot_D2_rmse_vs_N_linear.png'), dpi=150, bbox_inches='tight')
@@ -623,7 +631,7 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
             align='left', color='steelblue', edgecolor='black', alpha=0.7)
     ax.set_xlabel('n* (max usable Fourier mode)', fontsize=12)
     ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'{test_case} [TRUNCATED]: Distribution of n*\n'
+    ax.set_title(f'{domain_label} [{test_case}] TRUNCATED: Distribution of n*\n'
                  f'Mean: {np.mean(n_star_vals):.1f}, Std: {np.std(n_star_vals):.1f}',
                  fontsize=13)
     ax.grid(True, alpha=0.3, axis='y')
@@ -638,12 +646,12 @@ def generate_plots(table: Dict[str, np.ndarray], stats: Dict,
 # SUMMARY PRINTING
 # =============================================================================
 
-def print_summary(stats: Dict, binned: Dict, test_case: str):
+def print_summary(stats: Dict, binned: Dict, test_case: str, domain: str = 'disk'):
     """Print summary statistics."""
     formula_str = EXPECTED_FORMULAS.get(test_case, 'unknown')
     
     print(f"\n{'='*75}")
-    print(f"TRUNCATED RMSE TEST SUMMARY: {test_case}")
+    print(f"TRUNCATED RMSE TEST SUMMARY: {domain.upper()} / {test_case}")
     print(f"Formula: {formula_str}")
     print(f"{'='*75}")
     
@@ -687,9 +695,9 @@ def print_summary(stats: Dict, binned: Dict, test_case: str):
 # MAIN PROCESSING
 # =============================================================================
 
-def process_one_case(results_dir: str, test_case: str, output_base: str):
+def process_one_case(results_dir: str, test_case: str, output_base: str, domain: str = 'disk'):
     """Process results for one test case."""
-    print(f"\nProcessing: {test_case}")
+    print(f"\nProcessing: {domain} / {test_case}")
     print(f"  Results dir: {results_dir}")
     
     results = load_results(results_dir)
@@ -700,7 +708,7 @@ def process_one_case(results_dir: str, test_case: str, output_base: str):
     print(f"  Loaded {len(results)} seed results")
     
     # Build pooled table
-    table = build_pooled_table(results, test_case)
+    table = build_pooled_table(results, test_case, domain)
     print(f"  Pooled {len(table['seed'])} data points")
     
     # Compute statistics
@@ -708,14 +716,15 @@ def process_one_case(results_dir: str, test_case: str, output_base: str):
     binned = compute_binned_statistics(table)
     
     # Print summary
-    print_summary(stats, binned, test_case)
+    print_summary(stats, binned, test_case, domain)
     
     # Generate plots
-    plot_dir = os.path.join(output_base, f'plots_truncated_{test_case}')
-    generate_plots(table, stats, binned, plot_dir, test_case)
+    plot_dir = os.path.join(output_base, f'plots_truncated_{domain}_{test_case}')
+    generate_plots(table, stats, binned, plot_dir, test_case, domain)
     
     # Save summary JSON
     summary = {
+        'domain': domain,
         'test_case': test_case,
         'test_type': 'truncated_rmse',
         'formula': EXPECTED_FORMULAS.get(test_case, 'unknown'),
@@ -724,7 +733,7 @@ def process_one_case(results_dir: str, test_case: str, output_base: str):
         'binned': binned,
     }
     
-    summary_path = os.path.join(output_base, f'rmse_truncated_summary_{test_case}.json')
+    summary_path = os.path.join(output_base, f'rmse_truncated_summary_{domain}_{test_case}.json')
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
     print(f"  Saved summary: {summary_path}")
@@ -752,21 +761,37 @@ def main():
         HAS_MATPLOTLIB = False
     
     if args.results_dir:
-        # Infer test case from directory name
+        # Infer test case and domain from directory name
         dirname = os.path.basename(args.results_dir.rstrip('/'))
         test_case = 'unknown'
+        domain = 'disk'  # default
+        
         for tc in TEST_CASES:
             if tc in dirname:
                 test_case = tc
                 break
-        process_one_case(args.results_dir, test_case, args.output_dir)
+        
+        for d in DOMAINS:
+            if d in dirname:
+                domain = d
+                break
+        
+        process_one_case(args.results_dir, test_case, args.output_dir, domain)
     
     elif args.all_cases:
-        for tc in TEST_CASES:
-            for suffix in ['_random_rho', '']:
-                results_dir = f"rmse_truncated_results_{tc}{suffix}"
-                if os.path.exists(results_dir):
-                    process_one_case(results_dir, tc, args.output_dir)
+        # Search for all result directories
+        for domain in DOMAINS:
+            for tc in TEST_CASES:
+                for suffix in ['_random_rho', '']:
+                    if domain == 'disk':
+                        # Disk uses the old naming convention
+                        results_dir = f"rmse_truncated_results_{tc}{suffix}"
+                    else:
+                        # Conformal domains include domain name
+                        results_dir = f"rmse_truncated_results_{domain}_{tc}{suffix}"
+                    
+                    if os.path.exists(results_dir):
+                        process_one_case(results_dir, tc, args.output_dir, domain)
     else:
         print("Specify --results-dir or --all-cases")
         parser.print_help()

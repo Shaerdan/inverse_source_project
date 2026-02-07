@@ -21,6 +21,11 @@ slurm_statistical/
 slurm_*/
 
 
+# zip/compressed backups
+*.gz
+*.zip
+
+
 # Windows
 *:Zone.Identifier
 Thumbs.db
