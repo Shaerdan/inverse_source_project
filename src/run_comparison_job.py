@@ -40,7 +40,21 @@ from conformal_solver import (
     ConformalForwardSolver,
     ConformalNonlinearInverseSolver
 )
-from mesh import get_source_grid, get_brain_boundary
+from mesh import get_source_grid, get_ellipse_source_grid, get_brain_source_grid, get_brain_boundary
+
+# Import depth-weighted linear solvers
+from depth_weighted_solvers import (
+    compute_conformal_radii_disk,
+    compute_conformal_radii_general,
+    compute_depth_weights,
+    solve_l2_weighted,
+    solve_l1_weighted_admm,
+    solve_tv_weighted,
+    compute_l_curve_weighted,
+    select_beta_heuristic,
+    compute_intensity_distribution,
+    analyze_solver_bias,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -63,6 +77,7 @@ DEFAULT_RHO_MIN = 0.6
 DEFAULT_RHO_MAX = 0.8
 DEFAULT_INTENSITY_RANGE = (0.5, 2.0)
 DEFAULT_MARGIN = 2  # N_max >= N + margin
+DEFAULT_BETA = 1.0  # Depth weighting exponent (empirically validated)
 
 
 # =============================================================================
@@ -70,30 +85,37 @@ DEFAULT_MARGIN = 2  # N_max >= N + margin
 # =============================================================================
 
 def compute_sigma_for_target_nmax(n_sources: int, rho_min: float, n_sensors: int,
-                                   margin: int = 2, safety_factor: float = 0.5) -> Tuple[float, int, int]:
+                                   margin: int = 2) -> Tuple[float, int, int]:
     """
-    Compute σ_noise such that N_max >= N + margin.
+    Compute σ_noise such that N_max = N + margin (approximately).
+    
+    We use the exact formula from the paper:
+        n* = max{n : ρ_min^n / (π n) > σ_Four}
+        N_max = floor(2/3 * n*)
+    
+    Given target N_max, we solve for σ_noise that gives this N_max.
     
     Returns:
         sigma_noise: noise standard deviation
-        n_star_target: target Fourier cutoff
+        n_star_target: target Fourier cutoff  
         n_max_target: resulting N_max
     """
     # Target N_max
     n_max_target = n_sources + margin
     
     # Required n* (from N_max = floor(2/3 * n*))
-    # n* >= (3/2) * N_max
+    # We need n* such that floor(2/3 * n*) = n_max_target
+    # This means n* >= ceil(1.5 * n_max_target)
     n_star_target = int(np.ceil(1.5 * n_max_target))
     
-    # At cutoff: ρ^{n*} / (π * n*) = σ_Four
-    # σ_Four = σ_noise / √M
+    # At cutoff n*: signal = noise threshold
+    # ρ^{n*} / (π * n*) = σ_Four
+    # σ_Four = σ_noise * sqrt(2/M)  [Fourier domain noise]
     sigma_four = (rho_min ** n_star_target) / (np.pi * n_star_target)
     
-    # Apply safety factor (smaller σ → larger n*)
-    sigma_four *= safety_factor
-    
-    sigma_noise = sigma_four * np.sqrt(n_sensors)
+    # Convert to physical noise: σ_noise = σ_Four * sqrt(M/2)
+    # Note: The factor sqrt(2/M) comes from DFT normalization
+    sigma_noise = sigma_four * np.sqrt(n_sensors / 2)
     
     return sigma_noise, n_star_target, n_max_target
 
@@ -187,56 +209,125 @@ def generate_sources(n_sources: int, rho_min: float, rho_max: float,
 # =============================================================================
 
 def generate_interior_grid(domain: str, spacing: float, cmap=None) -> np.ndarray:
-    """Generate interior grid points for a domain."""
+    """Generate interior grid points for a domain using gmsh (or fallback).
+    
+    Uses proper gmsh mesh generation for quality triangular mesh,
+    then extracts interior nodes. This ensures uniform point distribution
+    matching FEM mesh quality.
+    
+    If gmsh is not available, falls back to sunflower pattern (for disk/ellipse)
+    or regular grid with point-in-polygon (for brain).
+    
+    The mesh naturally places interior nodes approximately one grid
+    spacing from the boundary due to triangular mesh structure.
+    
+    Parameters
+    ----------
+    domain : str
+        One of 'disk', 'ellipse', 'brain'
+    spacing : float
+        Grid resolution (mesh element size)
+    cmap : optional
+        Conformal map (not used, kept for API compatibility)
+        
+    Returns
+    -------
+    points : ndarray (N, 2)
+        Interior mesh nodes in physical coordinates
+    """
+    # Check if gmsh is available by trying to import it directly
+    try:
+        import gmsh
+        use_gmsh = True
+    except ImportError:
+        use_gmsh = False
+        print(f"[generate_interior_grid] gmsh not available, using fallback for {domain}")
+    
     if domain == 'disk':
-        # Generate on regular grid, filter to interior
-        x = np.arange(-1 + spacing/2, 1, spacing)
-        y = np.arange(-1 + spacing/2, 1, spacing)
-        xx, yy = np.meshgrid(x, y)
-        points = np.column_stack([xx.ravel(), yy.ravel()])
-        # Keep interior points (with margin)
-        r = np.sqrt(points[:, 0]**2 + points[:, 1]**2)
-        mask = r < 0.95
-        return points[mask]
+        if use_gmsh:
+            grid = get_source_grid(resolution=spacing, radius=1.0)
+        else:
+            grid = _generate_disk_grid_fallback(spacing)
+        return grid
     
     elif domain == 'ellipse':
         a, b = 1.5, 0.8
-        x = np.arange(-a + spacing/2, a, spacing)
-        y = np.arange(-b + spacing/2, b, spacing)
-        xx, yy = np.meshgrid(x, y)
-        points = np.column_stack([xx.ravel(), yy.ravel()])
-        # Inside ellipse: (x/a)² + (y/b)² < 1
-        inside = (points[:, 0]/a)**2 + (points[:, 1]/b)**2 < 0.95
-        return points[inside]
+        if use_gmsh:
+            grid = get_ellipse_source_grid(a=a, b=b, resolution=spacing, margin=0.0)
+        else:
+            grid = _generate_ellipse_grid_fallback(a, b, spacing)
+        return grid
     
     elif domain == 'brain':
-        # Get brain boundary
-        boundary = get_brain_boundary(n_points=200)
-        # Bounding box
-        xmin, xmax = boundary[:, 0].min(), boundary[:, 0].max()
-        ymin, ymax = boundary[:, 1].min(), boundary[:, 1].max()
-        
-        x = np.arange(xmin + spacing/2, xmax, spacing)
-        y = np.arange(ymin + spacing/2, ymax, spacing)
-        xx, yy = np.meshgrid(x, y)
-        points = np.column_stack([xx.ravel(), yy.ravel()])
-        
-        # Point-in-polygon test
-        from matplotlib.path import Path
-        path = Path(boundary)
-        inside = path.contains_points(points)
-        
-        # Additional margin from boundary
-        interior_pts = points[inside]
-        if len(interior_pts) > 0:
-            tree = cKDTree(boundary)
-            dists, _ = tree.query(interior_pts)
-            margin_mask = dists > spacing * 0.5
-            return interior_pts[margin_mask]
-        return interior_pts
+        if use_gmsh:
+            grid = get_brain_source_grid(resolution=spacing, margin=0.0)
+        else:
+            grid = _generate_brain_grid_fallback(spacing)
+        return grid
     
     else:
         raise ValueError(f"Unknown domain: {domain}")
+
+
+def _generate_disk_grid_fallback(spacing: float) -> np.ndarray:
+    """Generate disk interior grid using sunflower pattern (no gmsh needed)."""
+    # Estimate number of points from area and spacing
+    area = np.pi * 1.0**2
+    n_interior = int(area / (spacing**2 * 0.5))
+    
+    # Sunflower pattern
+    indices = np.arange(1, n_interior + 1)
+    golden_angle = np.pi * (3 - np.sqrt(5))
+    r = np.sqrt(indices / n_interior) * 0.95  # Stay slightly inside boundary
+    phi = golden_angle * indices
+    
+    return np.column_stack([r * np.cos(phi), r * np.sin(phi)])
+
+
+def _generate_ellipse_grid_fallback(a: float, b: float, spacing: float) -> np.ndarray:
+    """Generate ellipse interior grid using sunflower pattern (no gmsh needed)."""
+    # Estimate number of points
+    area = np.pi * a * b
+    n_interior = int(area / (spacing**2 * 0.5))
+    
+    # Sunflower pattern scaled to ellipse
+    indices = np.arange(1, n_interior + 1)
+    golden_angle = np.pi * (3 - np.sqrt(5))
+    r = np.sqrt(indices / n_interior) * 0.95  # Stay slightly inside
+    phi = golden_angle * indices
+    
+    return np.column_stack([a * r * np.cos(phi), b * r * np.sin(phi)])
+
+
+def _generate_brain_grid_fallback(spacing: float) -> np.ndarray:
+    """Generate brain interior grid using Delaunay (no gmsh needed)."""
+    from matplotlib.path import Path
+    
+    boundary = get_brain_boundary(n_points=200)
+    
+    # Bounding box
+    xmin, xmax = boundary[:, 0].min(), boundary[:, 0].max()
+    ymin, ymax = boundary[:, 1].min(), boundary[:, 1].max()
+    
+    # Regular grid
+    x = np.arange(xmin + spacing/2, xmax, spacing)
+    y = np.arange(ymin + spacing/2, ymax, spacing)
+    xx, yy = np.meshgrid(x, y)
+    points = np.column_stack([xx.ravel(), yy.ravel()])
+    
+    # Point-in-polygon test
+    path = Path(boundary)
+    inside = path.contains_points(points)
+    interior_pts = points[inside]
+    
+    # Margin from boundary
+    if len(interior_pts) > 0:
+        tree = cKDTree(boundary)
+        dists, _ = tree.query(interior_pts)
+        margin_mask = dists > spacing * 0.3
+        return interior_pts[margin_mask]
+    
+    return interior_pts
 
 
 def compute_grid_statistics(grid: np.ndarray) -> Dict:
@@ -749,6 +840,7 @@ def plot_linear_heatmap(q: np.ndarray, grid: np.ndarray, true_sources: List,
                         boundary_pts: np.ndarray = None, a: float = 1.5, b: float = 0.8):
     """Plot linear solution as heatmap with interpolated background and true sources overlaid."""
     from scipy.interpolate import griddata
+    from matplotlib.path import Path
     
     fig, ax = plt.subplots(figsize=(10, 10))
     
@@ -758,15 +850,15 @@ def plot_linear_heatmap(q: np.ndarray, grid: np.ndarray, true_sources: List,
     
     # Determine domain bounds
     if domain == 'disk':
-        xlim, ylim = (-1.2, 1.2), (-1.2, 1.2)
+        xlim, ylim = (-1.15, 1.15), (-1.15, 1.15)
     elif domain == 'ellipse':
-        xlim, ylim = (-a-0.2, a+0.2), (-b-0.2, b+0.2)
+        xlim, ylim = (-a-0.15, a+0.15), (-b-0.15, b+0.15)
     elif domain == 'brain' and boundary_pts is not None:
-        margin = 0.1
+        margin = 0.08
         xlim = (boundary_pts[:, 0].min() - margin, boundary_pts[:, 0].max() + margin)
         ylim = (boundary_pts[:, 1].min() - margin, boundary_pts[:, 1].max() + margin)
     else:
-        xlim, ylim = (-1.2, 1.2), (-1.2, 1.2)
+        xlim, ylim = (-1.15, 1.15), (-1.15, 1.15)
     
     # Create interpolated background heatmap
     nx, ny = 200, 200
@@ -775,27 +867,43 @@ def plot_linear_heatmap(q: np.ndarray, grid: np.ndarray, true_sources: List,
     Xi, Yi = np.meshgrid(xi, yi)
     
     # Interpolate (use 'linear' for smooth appearance)
-    Zi = griddata(grid, q, (Xi, Yi), method='linear', fill_value=0)
+    Zi = griddata(grid, q, (Xi, Yi), method='linear', fill_value=np.nan)
     
-    # Background interpolated heatmap (70% transparent)
+    # Create domain mask for interpolation
+    if domain == 'disk':
+        mask = Xi**2 + Yi**2 > 1.0
+    elif domain == 'ellipse':
+        mask = (Xi/a)**2 + (Yi/b)**2 > 1.0
+    elif domain == 'brain' and boundary_pts is not None:
+        path = Path(boundary_pts)
+        points = np.column_stack([Xi.ravel(), Yi.ravel()])
+        inside = path.contains_points(points).reshape(Xi.shape)
+        mask = ~inside
+    else:
+        mask = np.zeros_like(Xi, dtype=bool)
+    
+    # Apply mask - set outside to NaN
+    Zi[mask] = np.nan
+    
+    # Background interpolated heatmap (masked to domain)
     ax.imshow(Zi, extent=[xlim[0], xlim[1], ylim[0], ylim[1]], origin='lower',
-              cmap='RdBu_r', vmin=-vmax, vmax=vmax, alpha=0.3, aspect='auto')
+              cmap='RdBu_r', vmin=-vmax, vmax=vmax, alpha=0.4, aspect='auto')
     
-    # Grid points on top (more visible)
+    # Grid points on top (only interior points)
     scatter = ax.scatter(grid[:, 0], grid[:, 1], c=q, cmap='RdBu_r', 
-                         vmin=-vmax, vmax=vmax, s=40, alpha=0.9, edgecolors='gray', linewidths=0.3)
+                         vmin=-vmax, vmax=vmax, s=35, alpha=0.9, edgecolors='gray', linewidths=0.3)
     plt.colorbar(scatter, ax=ax, label='Intensity', shrink=0.8)
     
-    # Domain boundary
+    # Domain boundary (draw on top)
     if domain == 'disk':
-        circle = Circle((0, 0), 1, fill=False, edgecolor='black', linewidth=2)
+        circle = Circle((0, 0), 1, fill=False, edgecolor='black', linewidth=2.5, zorder=8)
         ax.add_patch(circle)
     elif domain == 'ellipse':
-        ellipse = Ellipse((0, 0), 2*a, 2*b, fill=False, edgecolor='black', linewidth=2)
+        ellipse = Ellipse((0, 0), 2*a, 2*b, fill=False, edgecolor='black', linewidth=2.5, zorder=8)
         ax.add_patch(ellipse)
     elif domain == 'brain' and boundary_pts is not None:
         ax.plot(np.append(boundary_pts[:, 0], boundary_pts[0, 0]),
-                np.append(boundary_pts[:, 1], boundary_pts[0, 1]), 'k-', linewidth=2)
+                np.append(boundary_pts[:, 1], boundary_pts[0, 1]), 'k-', linewidth=2.5, zorder=8)
     
     # True sources (hollow circles with thick edge, on top)
     for (x, y), q_true in true_sources:
@@ -805,7 +913,7 @@ def plot_linear_heatmap(q: np.ndarray, grid: np.ndarray, true_sources: List,
         # Intensity label
         ax.annotate(f'{q_true:.2f}', (x, y), xytext=(6, 6), textcoords='offset points',
                     fontsize=10, color='white', fontweight='bold', zorder=11,
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor=color, alpha=0.7))
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor=color, alpha=0.8))
     
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -975,7 +1083,17 @@ def run_comparison(n_sources: int, domain: str, seed: int, output_dir: str,
             recovered = result.sources
             residual = result.residual
         else:
-            solver = ConformalNonlinearInverseSolver(cmap, n_sources=n_sources, n_boundary=n_sensors)
+            # CRITICAL FIX: Compute physical sensor locations from disk angles
+            # forward_solve_conformal uses uniform disk angles, so we must pass
+            # the corresponding physical locations AND exact disk angles to the inverse solver
+            theta_disk = np.linspace(0, 2 * np.pi, n_sensors, endpoint=False)
+            w_boundary = np.exp(1j * theta_disk)  # Points on unit circle at disk angles
+            z_boundary = cmap.from_disk(w_boundary)  # Map to physical domain
+            sensor_locations = np.column_stack([np.real(z_boundary), np.imag(z_boundary)])
+            
+            solver = ConformalNonlinearInverseSolver(cmap, n_sources=n_sources, n_boundary=n_sensors,
+                                                      sensor_locations=sensor_locations,
+                                                      disk_angles=theta_disk)
             recovered, residual = solver.solve(u_measured, method='SLSQP', n_restarts=15)
         
         # Convert recovered to standard format
@@ -1026,13 +1144,25 @@ def run_comparison(n_sources: int, domain: str, seed: int, output_dir: str,
         # Build Green's matrix
         if domain == 'disk':
             G = build_greens_matrix_disk(sensor_angles, grid)
+            conformal_radii = compute_conformal_radii_disk(grid)
         else:
             G = build_greens_matrix_conformal(sensor_angles, grid, cmap)
+            conformal_radii = compute_conformal_radii_general(grid, cmap)
         
         mu = compute_mutual_coherence(G)
         kappa = compute_condition_number(G)
         
         print(f"  μ = {mu:.6f}, κ = {kappa:.2e}")
+        
+        # Compute depth sensitivity statistics
+        col_norms = np.linalg.norm(G, axis=0)
+        norm_ratio = col_norms.max() / (col_norms.min() + 1e-10)
+        print(f"  Column norm ratio (max/min): {norm_ratio:.1f}x")
+        
+        # Use fixed beta (empirically validated) - heuristic available via select_beta_heuristic()
+        beta = DEFAULT_BETA
+        depth_weights = compute_depth_weights(conformal_radii, beta)
+        print(f"  Depth weighting: β = {beta:.2f}")
         
         # Build TV graph
         tv_edges = build_tv_graph(grid)
@@ -1043,12 +1173,25 @@ def run_comparison(n_sources: int, domain: str, seed: int, output_dir: str,
             'mutual_coherence': mu,
             'condition_number': kappa if kappa != np.inf else 'inf',
             'n_tv_edges': len(tv_edges),
-            'methods': {}
+            'column_norm_ratio': float(norm_ratio),
+            'depth_weighting_beta': float(beta),
+            'methods': {},
+            'methods_weighted': {}
         }
         
-        # L2, L1, TV regularization
+        # Extract true source radii for bias analysis
+        true_radii = []
+        for (x, y), _ in true_sources:
+            if domain == 'disk':
+                true_radii.append(np.sqrt(x**2 + y**2))
+            else:
+                w = cmap.to_disk(complex(x, y))
+                true_radii.append(abs(w))
+        true_radii = np.array(true_radii)
+        
+        # L2, L1, TV regularization - ORIGINAL (unweighted)
         for method in ['l2', 'l1', 'tv']:
-            print(f"    {method.upper()} regularization...")
+            print(f"    {method.upper()} (original)...")
             
             lcurve = compute_l_curve(G, u_measured, ALPHA_RANGE, method, tv_edges)
             q = lcurve['best_solution']
@@ -1061,8 +1204,12 @@ def run_comparison(n_sources: int, domain: str, seed: int, output_dir: str,
             peaks = extract_peaks(q, grid)
             rmse = compute_rmse(true_sources, peaks)
             
+            # Intensity distribution by depth
+            intensity_dist = compute_intensity_distribution(q, conformal_radii)
+            bias_analysis = analyze_solver_bias(q, conformal_radii, true_radii)
+            
             print(f"      α = {lcurve['best_alpha']:.2e}, RMSE_pos = {rmse['rmse_position']:.4f}, "
-                  f"Det = {rmse['detection_rate']*100:.0f}%")
+                  f"Boundary = {intensity_dist.get('[0.7,0.9)', 0) + intensity_dist.get('[0.9,1.0)', 0):.0f}%")
             
             res_results['methods'][method] = {
                 'best_alpha': float(lcurve['best_alpha']),
@@ -1072,17 +1219,70 @@ def run_comparison(n_sources: int, domain: str, seed: int, output_dir: str,
                 'false_positive_rate': rmse['false_positive_rate'],
                 'n_detected': rmse['n_detected'],
                 'data_residual': float(data_res),
-                'relative_residual': float(rel_res)
+                'relative_residual': float(rel_res),
+                'intensity_distribution': intensity_dist,
+                'bias_analysis': {k: float(v) if not np.isnan(v) else None 
+                                  for k, v in bias_analysis.items() if isinstance(v, (int, float))}
             }
             
             # Plot L-curve
             plot_l_curve(lcurve, method, res_name, domain,
                          os.path.join(output_dir, f'lcurve_{method}_{res_name}_{domain}_N{n_sources}.png'))
             
-            # Plot heatmap (only for best resolution later, or all)
+            # Plot heatmap
             plot_linear_heatmap(q, grid, true_sources, domain,
-                                f'Linear Green\'s {method.upper()} - {res_name} (N={n_sources})',
-                                os.path.join(output_dir, f'heatmap_greens_{method}_{res_name}_{domain}_N{n_sources}.png'),
+                                f'Linear {method.upper()} Original - {res_name} (N={n_sources})',
+                                os.path.join(output_dir, f'heatmap_{method}_orig_{res_name}_{domain}_N{n_sources}.png'),
+                                rmse['rmse_position'],
+                                boundary_pts, ellipse_a, ellipse_b)
+        
+        # L2, L1, TV regularization - DEPTH-WEIGHTED
+        for method in ['l2', 'l1', 'tv']:
+            print(f"    {method.upper()} (depth-weighted, β={beta:.2f})...")
+            
+            # Use discrepancy principle for alpha selection (pass noise level)
+            lcurve = compute_l_curve_weighted(G, u_measured, ALPHA_RANGE, method, depth_weights, tv_edges, 
+                                              noise_level=sigma_noise)
+            q = lcurve['best_solution']
+            
+            # Data residual
+            data_res = np.linalg.norm(G @ q - u_measured)
+            rel_res = data_res / np.linalg.norm(u_measured)
+            
+            # Peak detection and RMSE
+            peaks = extract_peaks(q, grid)
+            rmse = compute_rmse(true_sources, peaks)
+            
+            # Intensity distribution by depth
+            intensity_dist = compute_intensity_distribution(q, conformal_radii)
+            bias_analysis = analyze_solver_bias(q, conformal_radii, true_radii)
+            
+            print(f"      α = {lcurve['best_alpha']:.2e}, RMSE_pos = {rmse['rmse_position']:.4f}, "
+                  f"Boundary = {intensity_dist.get('[0.7,0.9)', 0) + intensity_dist.get('[0.9,1.0)', 0):.0f}%")
+            
+            res_results['methods_weighted'][method] = {
+                'best_alpha': float(lcurve['best_alpha']),
+                'beta': float(beta),
+                'rmse_position': rmse['rmse_position'],
+                'rmse_intensity': rmse['rmse_intensity'],
+                'detection_rate': rmse['detection_rate'],
+                'false_positive_rate': rmse['false_positive_rate'],
+                'n_detected': rmse['n_detected'],
+                'data_residual': float(data_res),
+                'relative_residual': float(rel_res),
+                'intensity_distribution': intensity_dist,
+                'bias_analysis': {k: float(v) if not np.isnan(v) else None 
+                                  for k, v in bias_analysis.items() if isinstance(v, (int, float))}
+            }
+            
+            # Plot L-curve
+            plot_l_curve(lcurve, f'{method}_weighted', res_name, domain,
+                         os.path.join(output_dir, f'lcurve_{method}_weighted_{res_name}_{domain}_N{n_sources}.png'))
+            
+            # Plot heatmap
+            plot_linear_heatmap(q, grid, true_sources, domain,
+                                f'Linear {method.upper()} Weighted (β={beta:.1f}) - {res_name} (N={n_sources})',
+                                os.path.join(output_dir, f'heatmap_{method}_weighted_{res_name}_{domain}_N{n_sources}.png'),
                                 rmse['rmse_position'],
                                 boundary_pts, ellipse_a, ellipse_b)
         

@@ -327,9 +327,16 @@ class MFSConformalMap:
         return z[0] if scalar else z
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Get boundary points in physical domain."""
-        t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
-        return np.array([self.gamma(ti) for ti in t])
+        """Get boundary points at uniform CONFORMAL (disk) angles.
+        
+        This ensures DFT correctly computes Fourier coefficients.
+        Physical spacing will be non-uniform for non-circular domains.
+        
+        Returns points z_j = f^{-1}(e^{i*theta_j}) where theta_j = 2*pi*j/n_points.
+        """
+        theta_disk = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        w = np.exp(1j * theta_disk)
+        return self.from_disk(w)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
         """Check if points are inside domain using winding number."""
@@ -524,8 +531,16 @@ class EllipseMap(ConformalMap):
         return (self.to_disk(z + eps) - self.to_disk(z - eps)) / (2 * eps)
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        theta = np.linspace(0, 2*np.pi, n_points, endpoint=False)
-        return self.a * np.cos(theta) + 1j * self.b * np.sin(theta)
+        """Get boundary points at uniform CONFORMAL (disk) angles.
+        
+        This ensures DFT correctly computes Fourier coefficients.
+        Physical spacing will be non-uniform for ellipses with a != b.
+        
+        Returns points z_j = f^{-1}(e^{i*theta_j}) where theta_j = 2*pi*j/n_points.
+        """
+        theta_disk = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        w = np.exp(1j * theta_disk)
+        return self.from_disk(w)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
         z = np.asarray(z, dtype=complex)
@@ -652,20 +667,16 @@ class RectangleMap(ConformalMap):
         return z[0] if scalar else z
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Rectangle boundary."""
-        n_per_side = n_points // 4
+        """Get boundary points at uniform CONFORMAL (disk) angles.
         
-        pts = []
-        # Bottom: -a to a at y = -b
-        pts.extend(np.linspace(-self.a, self.a, n_per_side, endpoint=False) - 1j*self.b)
-        # Right: a, -b to b
-        pts.extend(self.a + 1j*np.linspace(-self.b, self.b, n_per_side, endpoint=False))
-        # Top: a to -a at y = b  
-        pts.extend(np.linspace(self.a, -self.a, n_per_side, endpoint=False) + 1j*self.b)
-        # Left: -a, b to -b
-        pts.extend(-self.a + 1j*np.linspace(self.b, -self.b, n_per_side, endpoint=False))
+        This ensures DFT correctly computes Fourier coefficients.
+        Physical spacing will be non-uniform for rectangles.
         
-        return np.array(pts[:n_points])
+        Returns points z_j = f^{-1}(e^{i*theta_j}) where theta_j = 2*pi*j/n_points.
+        """
+        theta_disk = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        w = np.exp(1j * theta_disk)
+        return self.from_disk(w)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
         z = np.asarray(z, dtype=complex)
@@ -824,8 +835,16 @@ class NumericalConformalMap(ConformalMap):
         return z[0] if scalar else z
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
-        return np.array([self.gamma(ti) for ti in t])
+        """Get boundary points at uniform CONFORMAL (disk) angles.
+        
+        This ensures DFT correctly computes Fourier coefficients.
+        Physical spacing will be non-uniform for non-circular domains.
+        
+        Returns points z_j = f^{-1}(e^{i*theta_j}) where theta_j = 2*pi*j/n_points.
+        """
+        theta_disk = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        w = np.exp(1j * theta_disk)
+        return self.from_disk(w)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
         """Check if inside using winding number."""
@@ -949,29 +968,16 @@ class PolygonMap(ConformalMap):
         return z[0] if scalar else z
     
     def boundary_physical(self, n_points: int) -> np.ndarray:
-        """Polygon boundary (interpolate along edges)."""
-        # Compute edge lengths for proportional distribution
-        edge_lengths = np.abs(np.diff(np.append(self.vertices, self.vertices[0])))
-        total_length = np.sum(edge_lengths)
+        """Get boundary points at uniform CONFORMAL (disk) angles.
         
-        pts = []
-        for i in range(self.n):
-            v1, v2 = self.vertices[i], self.vertices[(i+1) % self.n]
-            # Number of points proportional to edge length
-            n_edge = max(1, int(n_points * edge_lengths[i] / total_length))
-            edge_pts = np.linspace(v1, v2, n_edge, endpoint=False)
-            pts.extend(edge_pts)
+        This ensures DFT correctly computes Fourier coefficients.
+        Physical spacing will be non-uniform for polygons.
         
-        # Ensure we have exactly n_points
-        pts = np.array(pts)
-        if len(pts) < n_points:
-            # Add more points to longest edge
-            extra = n_points - len(pts)
-            v1, v2 = self.vertices[0], self.vertices[1]
-            extra_pts = np.linspace(v1, v2, extra + 2)[1:-1]
-            pts = np.append(pts, extra_pts)
-        
-        return pts[:n_points]
+        Returns points z_j = f^{-1}(e^{i*theta_j}) where theta_j = 2*pi*j/n_points.
+        """
+        theta_disk = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+        w = np.exp(1j * theta_disk)
+        return self.from_disk(w)
     
     def is_inside(self, z: np.ndarray) -> np.ndarray:
         """Check if inside polygon using winding number."""
@@ -1021,9 +1027,10 @@ class ConformalForwardSolver:
     """
     
     def __init__(self, conformal_map: ConformalMap, n_boundary: int = 100,
-                 sensor_locations: np.ndarray = None):
+                 sensor_locations: np.ndarray = None, disk_angles: np.ndarray = None):
         self.map = conformal_map
         self.n_boundary = n_boundary
+        self.disk_angles = disk_angles  # Store exact disk angles if provided
         
         # Sensor/boundary points in physical domain
         if sensor_locations is not None:
@@ -1070,25 +1077,37 @@ class ConformalForwardSolver:
         # Map sources to disk
         w_sources = self.map.to_disk(z_sources)
         
-        # Convert to real coordinates for vectorized Green's function
-        # w_boundary has shape (n_sensors,) complex
-        # w_sources has shape (n_sources,) complex
-        
-        # Vectorized Green's function computation
-        # For each sensor i and source j, compute G(w_boundary[i], w_sources[j])
-        # Then u[i] = sum_j q[j] * G[i,j]
+        # Check if sensors are on boundary (|w| ≈ 1) OR if disk_angles were provided
+        w_abs = np.abs(self.w_boundary)
+        on_boundary = self.disk_angles is not None or np.allclose(w_abs, 1.0, rtol=0.01)
         
         u = np.zeros(self.n_sensors)
         
-        # Precompute sensor positions (n_sensors, 2)
-        x_eval = np.column_stack([np.real(self.w_boundary), np.imag(self.w_boundary)])
+        if on_boundary:
+            # Use boundary formula (Poisson kernel) - more accurate for boundary sensors
+            # Use exact disk_angles if provided, otherwise extract from w_boundary
+            if self.disk_angles is not None:
+                theta_boundary = self.disk_angles
+            else:
+                theta_boundary = np.angle(self.w_boundary)
+            
+            for j in range(n_sources):
+                r_j = np.abs(w_sources[j])
+                phi_j = np.angle(w_sources[j])
+                # Poisson kernel formula for boundary potential
+                angle_diff = theta_boundary - phi_j
+                u += q_sources[j] * (-1.0 / (2 * np.pi)) * np.log(1 + r_j**2 - 2*r_j*np.cos(angle_diff))
+        else:
+            # Use interior Green's function
+            x_eval = np.column_stack([np.real(self.w_boundary), np.imag(self.w_boundary)])
+            
+            for j in range(n_sources):
+                xi_src = np.array([np.real(w_sources[j]), np.imag(w_sources[j])])
+                G_j = greens_function_disk_neumann(x_eval, xi_src)
+                u += q_sources[j] * G_j
         
-        for j in range(n_sources):
-            xi_src = np.array([np.real(w_sources[j]), np.imag(w_sources[j])])
-            G_j = greens_function_disk_neumann(x_eval, xi_src)  # (n_sensors,)
-            u += q_sources[j] * G_j
-        
-        return u
+        # Center output to match disk solver convention (Neumann BC determines u up to constant)
+        return u - np.mean(u)
 
 
 # =============================================================================
@@ -1436,17 +1455,24 @@ class ConformalNonlinearInverseSolver:
         Number of sources to recover
     n_boundary : int
         Number of boundary measurement points
+    sensor_locations : array, optional
+        Physical sensor locations
+    disk_angles : array, optional
+        Exact disk angles for sensors (avoids numerical precision issues)
     """
     
     def __init__(self, conformal_map: ConformalMap, n_sources: int = 4,
-                 n_boundary: int = 100, sensor_locations: np.ndarray = None):
+                 n_boundary: int = 100, sensor_locations: np.ndarray = None,
+                 disk_angles: np.ndarray = None):
         self.map = conformal_map
         self.n_sources = n_sources
         self.n_boundary = n_boundary
         self.sensor_locations = sensor_locations
-        # CRITICAL: Pass sensor_locations to ensure forward solver uses same positions as data
+        self.disk_angles = disk_angles
+        # CRITICAL: Pass sensor_locations AND disk_angles to ensure forward solver uses exact same angles as data
         self.forward = ConformalForwardSolver(conformal_map, n_boundary, 
-                                               sensor_locations=sensor_locations)
+                                               sensor_locations=sensor_locations,
+                                               disk_angles=disk_angles)
     
     def _objective_misfit(self, params: np.ndarray, u_meas: np.ndarray) -> float:
         """
@@ -1667,6 +1693,10 @@ class ConformalNonlinearInverseSolver:
         """
         n = self.n_sources
         np.random.seed(seed)
+        
+        # CRITICAL FIX: Center measured data to remove arbitrary constant (gauge freedom)
+        # This matches what AnalyticalNonlinearInverseSolver does in set_measured_data()
+        u_meas = u_meas - np.mean(u_meas)
         
         # Get domain bounding box from boundary
         boundary = self.map.boundary_physical(100)
