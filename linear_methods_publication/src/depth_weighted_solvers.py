@@ -457,27 +457,52 @@ def solve_tv_weighted(G, u, alpha, A_eq, b_eq, weights=None,
 # Alpha Selection
 # =============================================================================
 
-def compute_l_curve_weighted(G, u, alpha_range, reg_type='l2', weights=None, 
-                              tv_edges=None, noise_level=None, n_alphas=50,
-                              grid_points=None):
+def compute_l_curve_weighted(G, u, reg_type='l2', weights=None, 
+                              noise_level=None, n_alphas=50,
+                              alpha_range=(1e-8, 1e1)):
     """
     Select regularization parameter via L-curve or discrepancy principle.
     
-    Returns dict with best_solution, best_alpha, and diagnostic info.
+    If noise_level is provided, uses discrepancy principle:
+        Select smallest alpha where ||Gq - u|| >= noise_level * sqrt(M) * 1.3
+    
+    Otherwise, uses L-curve corner detection.
+    
+    Parameters
+    ----------
+    G : ndarray (M, Mg)
+        Forward matrix
+    u : ndarray (M,)
+        Measurement data
+    reg_type : str
+        'l2', 'l1', or 'tv'
+    weights : ndarray (Mg,) or None
+        Depth weights
+    noise_level : float or None
+        Noise standard deviation (for discrepancy principle)
+    n_alphas : int
+        Number of alpha values to test
+    alpha_range : tuple
+        (min_alpha, max_alpha)
+    
+    Returns
+    -------
+    alpha_opt : float
+        Selected regularization parameter
+    alphas : ndarray
+        All tested alpha values
+    metrics : dict
+        Residuals and regularization values for each alpha
     """
     M, Mg = G.shape
     
     A_eq = np.ones((1, Mg))
     b_eq = np.array([0.0])
     
-    if isinstance(alpha_range, np.ndarray):
-        alphas = alpha_range
-    else:
-        alphas = np.logspace(np.log10(alpha_range[0]), np.log10(alpha_range[1]), n_alphas)
+    alphas = np.logspace(np.log10(alpha_range[0]), np.log10(alpha_range[1]), n_alphas)
     
     residuals = []
     reg_norms = []
-    solutions = []
     
     for alpha in alphas:
         try:
@@ -486,15 +511,13 @@ def compute_l_curve_weighted(G, u, alpha_range, reg_type='l2', weights=None,
             elif reg_type == 'l1':
                 q = solve_l1_weighted_admm(G, u, alpha, A_eq, b_eq, weights, max_iter=500)
             else:  # tv
-                q = solve_tv_weighted(G, u, alpha, A_eq, b_eq, weights, 
-                                      grid_points=grid_points, max_iter=500)
+                q = solve_tv_weighted(G, u, alpha, A_eq, b_eq, weights, max_iter=500)
             
             res = np.linalg.norm(G @ q - u)
             
-            # Compute WEIGHTED regularization norm
             if reg_type == 'l2':
                 if weights is not None:
-                    reg = np.sqrt(np.sum(weights**2 * q**2))
+                    reg = np.sqrt(np.sum(weights * q**2))
                 else:
                     reg = np.linalg.norm(q)
             elif reg_type == 'l1':
@@ -507,104 +530,58 @@ def compute_l_curve_weighted(G, u, alpha_range, reg_type='l2', weights=None,
             
             residuals.append(res)
             reg_norms.append(reg)
-            solutions.append(q)
         except:
             residuals.append(np.inf)
             reg_norms.append(np.inf)
-            solutions.append(np.zeros(Mg))
     
     residuals = np.array(residuals)
     reg_norms = np.array(reg_norms)
     
+    metrics = {'residuals': residuals, 'reg_norms': reg_norms}
+    
+    # Remove invalid entries
     valid = np.isfinite(residuals) & np.isfinite(reg_norms) & (reg_norms > 0)
     
     if not np.any(valid):
-        idx = len(alphas) // 2
-        return {
-            'alphas': alphas,
-            'residuals': residuals,
-            'reg_norms': reg_norms,
-            'solutions': solutions,
-            'best_idx': idx,
-            'best_alpha': alphas[idx],
-            'best_solution': solutions[idx],
-            'method': 'fallback'
-        }
+        warnings.warn("No valid alpha values found, returning middle of range")
+        return alphas[n_alphas // 2], alphas, metrics
     
     # Discrepancy principle
     if noise_level is not None:
-        target_residual = noise_level * np.sqrt(M) * 1.3
+        target_residual = noise_level * np.sqrt(M) * 1.3  # Safety factor
         
+        # Find smallest alpha where residual >= target
         for i, alpha in enumerate(alphas):
             if valid[i] and residuals[i] >= target_residual:
-                return {
-                    'alphas': alphas,
-                    'residuals': residuals,
-                    'reg_norms': reg_norms,
-                    'solutions': solutions,
-                    'best_idx': i,
-                    'best_alpha': alpha,
-                    'best_solution': solutions[i],
-                    'target_residual': target_residual,
-                    'method': 'discrepancy'
-                }
+                return alpha, alphas, metrics
         
-        # If none found, use largest valid alpha
-        valid_idx = np.where(valid)[0][-1]
-        return {
-            'alphas': alphas,
-            'residuals': residuals,
-            'reg_norms': reg_norms,
-            'solutions': solutions,
-            'best_idx': valid_idx,
-            'best_alpha': alphas[valid_idx],
-            'best_solution': solutions[valid_idx],
-            'target_residual': target_residual,
-            'method': 'discrepancy_fallback'
-        }
+        # If none found, use largest alpha
+        return alphas[valid][-1], alphas, metrics
     
     # L-curve corner detection
-    log_res = np.log10(residuals[valid] + 1e-15)
-    log_reg = np.log10(reg_norms[valid] + 1e-15)
+    log_res = np.log10(residuals[valid])
+    log_reg = np.log10(reg_norms[valid])
     alphas_valid = alphas[valid]
-    valid_indices = np.where(valid)[0]
     
+    # Compute curvature
     if len(log_res) < 5:
-        idx = len(valid_indices) // 2
-        best_idx = valid_indices[idx]
-        return {
-            'alphas': alphas,
-            'residuals': residuals,
-            'reg_norms': reg_norms,
-            'solutions': solutions,
-            'best_idx': best_idx,
-            'best_alpha': alphas[best_idx],
-            'best_solution': solutions[best_idx],
-            'method': 'lcurve_few_points'
-        }
+        # Not enough points, return middle
+        idx = len(alphas_valid) // 2
+        return alphas_valid[idx], alphas, metrics
     
-    # Curvature
+    # Numerical second derivative (curvature approximation)
     d1_res = np.gradient(log_res)
     d1_reg = np.gradient(log_reg)
     d2_res = np.gradient(d1_res)
     d2_reg = np.gradient(d1_reg)
     
-    curvature = np.abs(d1_res * d2_reg - d1_reg * d2_res) / (d1_res**2 + d1_reg**2 + 1e-15)**1.5
+    # Curvature formula
+    curvature = np.abs(d1_res * d2_reg - d1_reg * d2_res) / (d1_res**2 + d1_reg**2)**1.5
     
-    idx_in_valid = np.argmax(curvature[2:-2]) + 2
-    best_idx = valid_indices[idx_in_valid]
+    # Find maximum curvature
+    idx = np.argmax(curvature[2:-2]) + 2  # Avoid edge effects
     
-    return {
-        'alphas': alphas,
-        'residuals': residuals,
-        'reg_norms': reg_norms,
-        'solutions': solutions,
-        'best_idx': best_idx,
-        'best_alpha': alphas[best_idx],
-        'best_solution': solutions[best_idx],
-        'curvature': curvature,
-        'method': 'lcurve'
-    }
+    return alphas_valid[idx], alphas, metrics
 
 
 # =============================================================================
@@ -687,136 +664,3 @@ def analyze_solver_bias(q, conformal_radii, true_rho_range):
         'center_fraction': center_intensity / total if total > 0 else 0,
         'total_intensity': total
     }
-
-    
-
-class DepthWeightedL2Solver:
-    """Depth-weighted L2 (Tikhonov) regularization solver."""
-    
-    def __init__(self, G, depth_weights=None):
-        self.G = G
-        self.n_sensors, self.n_grid = G.shape
-        self.weights = depth_weights if depth_weights is not None else np.ones(self.n_grid)
-        self.A_eq = np.ones((1, self.n_grid))
-        self.b_eq = np.zeros(1)
-    
-    def solve(self, u, alpha=None, alpha_selection=None, target_residual=None, 
-              noise_level=None, alpha_range=None):
-        """
-        Solve weighted L2 problem.
-        
-        Parameters
-        ----------
-        u : ndarray
-            Measured data
-        alpha : float, optional
-            Regularization parameter (if known)
-        alpha_selection : str, optional
-            'discrepancy' or 'lcurve'
-        target_residual : float, optional
-            Target residual for discrepancy principle
-        noise_level : float, optional
-            Noise std dev (alternative to target_residual)
-        alpha_range : tuple or ndarray, optional
-            Range for alpha search
-            
-        Returns
-        -------
-        dict with 'solution', 'alpha', and diagnostics
-        """
-        if alpha is not None:
-            q = solve_l2_weighted(self.G, u, alpha, self.A_eq, self.b_eq, self.weights)
-            return {'solution': q, 'alpha': alpha, 'method': 'fixed'}
-        
-        if alpha_range is None:
-            alpha_range = np.logspace(-10, 0, 50)
-        
-        if alpha_selection == 'discrepancy':
-            if target_residual is not None:
-                noise_level = target_residual / (np.sqrt(self.n_sensors) * 1.3)
-        
-        result = compute_l_curve_weighted(
-            self.G, u, alpha_range, reg_type='l2', weights=self.weights,
-            noise_level=noise_level
-        )
-        
-        return {
-            'solution': result['best_solution'],
-            'alpha': result['best_alpha'],
-            'method': result.get('method', 'lcurve'),
-            'lcurve_data': result
-        }
-
-
-class DepthWeightedL1Solver:
-    """Depth-weighted L1 regularization solver using ADMM."""
-    
-    def __init__(self, G, depth_weights=None):
-        self.G = G
-        self.n_sensors, self.n_grid = G.shape
-        self.weights = depth_weights if depth_weights is not None else np.ones(self.n_grid)
-        self.A_eq = np.ones((1, self.n_grid))
-        self.b_eq = np.zeros(1)
-    
-    def solve(self, u, alpha=None, alpha_selection=None, target_residual=None,
-              noise_level=None, alpha_range=None):
-        if alpha is not None:
-            q = solve_l1_weighted_admm(self.G, u, alpha, self.A_eq, self.b_eq, self.weights)
-            return {'solution': q, 'alpha': alpha, 'method': 'fixed'}
-        
-        if alpha_range is None:
-            alpha_range = np.logspace(-10, 0, 50)
-        
-        if alpha_selection == 'discrepancy':
-            if target_residual is not None:
-                noise_level = target_residual / (np.sqrt(self.n_sensors) * 1.3)
-        
-        result = compute_l_curve_weighted(
-            self.G, u, alpha_range, reg_type='l1', weights=self.weights,
-            noise_level=noise_level
-        )
-        
-        return {
-            'solution': result['best_solution'],
-            'alpha': result['best_alpha'],
-            'method': result.get('method', 'lcurve'),
-            'lcurve_data': result
-        }
-
-
-class DepthWeightedTVSolver:
-    """Depth-weighted Total Variation regularization solver."""
-    
-    def __init__(self, G, grid_points, depth_weights=None):
-        self.G = G
-        self.grid_points = grid_points
-        self.n_sensors, self.n_grid = G.shape
-        self.weights = depth_weights if depth_weights is not None else np.ones(self.n_grid)
-        self.A_eq = np.ones((1, self.n_grid))
-        self.b_eq = np.zeros(1)
-    
-    def solve(self, u, alpha=None, alpha_selection=None, target_residual=None,
-              noise_level=None, alpha_range=None):
-        if alpha is not None:
-            q = solve_tv_weighted(self.G, u, alpha, self.A_eq, self.b_eq, 
-                                   self.weights, grid_points=self.grid_points)
-            return {'solution': q, 'alpha': alpha, 'method': 'fixed'}
-        
-        if alpha_range is None:
-            alpha_range = np.logspace(-10, 0, 50)
-        
-        if alpha_selection == 'discrepancy':
-            if target_residual is not None:
-                noise_level = target_residual / (np.sqrt(self.n_sensors) * 1.3)
-        
-        result = compute_l_curve_weighted(
-            self.G, u, alpha_range, reg_type='tv', weights=self.weights,
-            noise_level=noise_level, grid_points=self.grid_points
-        )
-        
-        return {
-            'solution': result['best_solution'],
-            'alpha': result['best_alpha'],
-            'method': result.get('method', 'lcurve'),
-            'lcurve_data': result
-        }

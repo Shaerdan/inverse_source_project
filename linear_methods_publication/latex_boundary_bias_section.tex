@@ -1,0 +1,204 @@
+%=============================================================================
+% LATEX TEXT FOR BOUNDARY BIAS SECTION
+% Insert this after Section 6 "Linear (Distributed Source) Methods"
+% or as a new subsection within that section
+%=============================================================================
+
+\subsection{Boundary Bias in Linear Methods}\label{sec:boundary_bias}
+
+While the ill-conditioning analysed above explains why linear methods cannot achieve 
+precise point source recovery, we observe an additional systematic phenomenon: 
+reconstructed intensity concentrates near the domain boundary regardless of true 
+source locations. We now explain this \textbf{boundary bias} and propose a correction.
+
+\subsubsection{The Physics of Boundary Bias}
+
+Consider the Green's function matrix $G \in \R^{M \times M_g}$ with columns 
+$\mathbf{g}_j = G(:,j)$ corresponding to grid points at conformal radii $\rho_j$. 
+The column norm $\|\mathbf{g}_j\|$ measures the ``sensitivity'' of boundary 
+measurements to a unit source at position $j$.
+
+\begin{proposition}[Column Norm Sensitivity]\label{prop:column_norm}
+For the Neumann Green's function on a simply-connected domain, the column norms 
+satisfy:
+\begin{equation}\label{eq:column_norm}
+\|\mathbf{g}_j\| \sim C (1 - \rho_j)^\gamma, \quad \gamma \approx 1,
+\end{equation}
+where $C$ is domain-dependent and $\rho_j = |f(\bx_j)|$ is the conformal radius.
+\end{proposition}
+
+This relationship, illustrated in Figure~\ref{fig:column_norm}, shows that 
+boundary sources ($\rho \approx 1$) produce boundary measurements with 
+$\sim 20\times$ larger amplitude than centre sources ($\rho \approx 0$).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\textwidth]{Figs/boundary_bias/fig_A_column_norm_disk.png}
+\caption{Column norm $\|G_j\|$ versus conformal radius $\rho_j$ for the unit disk 
+($M_g = 360$ grid points, $M = 100$ sensors). The sensitivity varies by a factor 
+of approximately 20 between centre and boundary, explaining the boundary bias in 
+standard regularisation.}
+\label{fig:column_norm}
+\end{figure}
+
+The consequence for regularised inversion is immediate. Consider L1 regularisation:
+\begin{equation}
+\min_{\mathbf{q}} \|G\mathbf{q} - \mathbf{u}^d\|^2 + \alpha \|\mathbf{q}\|_1.
+\end{equation}
+To achieve a given data fit $\|G\mathbf{q} - \mathbf{u}^d\| = \epsilon$, placing 
+intensity at a boundary grid point $j$ (large $\|\mathbf{g}_j\|$) requires less 
+intensity $|q_j|$ than placing it at a centre grid point (small $\|\mathbf{g}_j\|$). 
+Since the regulariser penalises $\sum_j |q_j|$ uniformly, the optimiser prefers 
+boundary sources---they are ``cheaper'' in terms of the objective function.
+
+\subsubsection{Depth-Weighted Regularisation}
+
+We correct the bias by introducing depth-dependent weights that compensate for 
+the column norm variation:
+\begin{equation}\label{eq:depth_weights}
+w_j = (1 - \rho_j)^{-\beta}, \quad \beta = 1.0,
+\end{equation}
+and modify the regularised problem to:
+\begin{equation}\label{eq:weighted_reg}
+\min_{\mathbf{q}} \|G\mathbf{q} - \mathbf{u}^d\|^2 + \alpha \sum_j w_j |q_j|.
+\end{equation}
+
+The exponent $\beta = 1$ approximately matches the column norm decay 
+\eqref{eq:column_norm}, so the weighted penalty $w_j |q_j|$ has approximately 
+uniform sensitivity across depths. We validated this choice empirically across 
+multiple seeds and domains.
+
+\begin{remark}[Regularisation Parameter Selection]
+For the weighted problem, the standard L-curve method may select $\alpha$ too 
+small. We instead use the \textbf{discrepancy principle}: select the smallest 
+$\alpha$ such that the residual matches the expected noise level,
+\begin{equation}
+\|G\mathbf{q}_\alpha - \mathbf{u}^d\| \geq c \cdot \sigma_{noise} \sqrt{M},
+\end{equation}
+with $c \approx 1.3$ as a safety factor.
+\end{remark}
+
+\subsubsection{Visual Comparison}
+
+Figure~\ref{fig:heatmaps} compares reconstructions from standard (``original'') 
+and depth-weighted methods for $N = 4$ sources at conformal radii 
+$\rho \in [0.5, 0.7]$---the middle zone of the domain.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{Figs/boundary_bias/fig_B_heatmaps_disk.png}
+\caption{Intensity heatmaps for L2, L1, and TV regularisation (rows) with 
+standard and depth-weighted penalties (columns). True source locations marked 
+with $\times$. Standard L1 (centre-left) places nearly all intensity at the 
+boundary despite sources being in the middle zone. Depth-weighted L1 
+(centre-right) correctly concentrates intensity near true locations.}
+\label{fig:heatmaps}
+\end{figure}
+
+The most dramatic difference appears in L1 regularisation: standard L1 places 
+99\% of intensity in the boundary zone ($\rho > 0.9$), while depth-weighted L1 
+places 76\% in the target zone ($\rho \in [0.5, 0.7]$).
+
+\subsubsection{Quantitative Analysis}
+
+Figure~\ref{fig:intensity_dist} shows the intensity distribution across radial 
+zones for all three methods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{Figs/boundary_bias/fig_C_intensity_dist_disk.png}
+\caption{Intensity fraction by radial zone: $[0, 0.5)$ (centre), 
+$[0.5, 0.7)$ (target, shaded green), $[0.7, 0.9)$ (outer), $[0.9, 1.0)$ 
+(boundary). Standard methods (coral) concentrate intensity at the boundary; 
+depth-weighted methods (blue) shift intensity toward the target zone.}
+\label{fig:intensity_dist}
+\end{figure}
+
+Table~\ref{tab:boundary_bias} summarises the improvement across methods.
+
+\begin{table}[H]
+\centering
+\caption{Boundary bias correction: percentage of total intensity in the target 
+zone ($\rho \in [0.5, 0.7]$) for standard versus depth-weighted regularisation. 
+Results for $N = 4$ sources, $\sigma_{noise} = 0.001$, disk domain.}
+\label{tab:boundary_bias}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Original & Depth-Weighted & Improvement \\
+\midrule
+L2     & 23\%     & 34\%           & $+11\%$ \\
+\textbf{L1}     & \textbf{1\%}      & \textbf{76\%}           & $\mathbf{+75\%}$ \\
+TV     & 18\%     & 33\%           & $+15\%$ \\
+\midrule
+Nonlinear & 100\% & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Why L1 Shows the Largest Improvement}
+
+The dramatic improvement for L1 (1\% $\to$ 76\%) compared to L2 and TV reflects 
+their different sparsity-promoting properties:
+
+\begin{itemize}
+\item \textbf{L1 regularisation} promotes sparsity: it selects a small number 
+of active grid points. With $\mu \approx 0.99$ mutual coherence, many nearly 
+equivalent sparse solutions exist, and the algorithm chooses the one minimising 
+$\|\mathbf{q}\|_1$. Without weighting, this is the ``cheapest'' sparse solution, 
+which concentrates at the boundary. With proper weighting, L1 can select grid 
+points actually near the true sources.
+
+\item \textbf{L2 regularisation} inherently spreads intensity across the grid 
+(not sparse). Boundary bias exists but is diluted across many points. Weighting 
+helps somewhat but cannot make L2 solutions point-like.
+
+\item \textbf{TV regularisation} promotes piecewise-constant regions rather 
+than point sources. The edge-based penalty (differences between adjacent points) 
+responds differently to depth weighting than point-based penalties.
+\end{itemize}
+
+Thus, L1 is both the method most susceptible to boundary bias and the method 
+that benefits most from correction---precisely because it is designed to produce 
+sparse solutions.
+
+\subsubsection{Statistical Validation}
+
+Figure~\ref{fig:boxplots} shows the robustness of the correction across 50 
+independent noise realisations with varying source configurations.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{Figs/boundary_bias/fig_D_boxplots_disk.png}
+\caption{Box plots of target zone intensity fraction across 50 seeds. 
+Mann--Whitney $U$ test confirms the improvement is statistically significant 
+($p < 10^{-10}$ for all methods). L1 shows the most consistent improvement, 
+with median increasing from $\approx 5\%$ to $\approx 70\%$.}
+\label{fig:boxplots}
+\end{figure}
+
+\subsubsection{Implications}
+
+The boundary bias phenomenon and its correction have practical implications:
+
+\begin{enumerate}
+\item \textbf{Standard linear methods are unreliable for source localisation}, 
+even qualitatively. Without correction, they systematically mislocate sources 
+toward the boundary.
+
+\item \textbf{Depth weighting partially corrects the bias}, especially for L1 
+regularisation. However, even corrected linear methods cannot match nonlinear 
+precision (Table~\ref{tab:boundary_bias}, last row).
+
+\item \textbf{The correction is geometry-independent}: it depends only on the 
+conformal radius $\rho_j = |f(\bx_j)|$, extending naturally to ellipse and 
+brain-shaped domains via conformal mapping.
+\end{enumerate}
+
+Despite the improvement, linear methods remain fundamentally limited by the 
+mutual coherence and ill-conditioning analysed in Section~\ref{sec:linear_limit}. 
+Depth weighting addresses one source of error (boundary bias) but cannot overcome 
+the information-theoretic limits of the discretised inverse problem.
+
+%=============================================================================
+% END OF BOUNDARY BIAS SECTION
+%=============================================================================
